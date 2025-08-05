@@ -1,0 +1,29 @@
+/*
+ * Copyright 2025, seL4 Project
+ *
+ * SPDX-License-Identifier: GPL-2.0-only
+ */
+
+/ {
+    chosen {
+        seL4,elfloader-devices =
+            "serial1",
+            &{/psci},
+            &{/timer};
+
+        seL4,kernel-devices =
+            "serial1", 
+            &{/interrupt-controller@30800000},
+            &{/timer};
+    };
+
+    /* Configure physical base address for Phytium Pi memory layout */
+    memory {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        /* Phytium Pi RAM starts at 0x80000000, set kernel base accordingly */
+        seL4,phys-base = <0x0 0x80200000>;
+    };
+
+
+};

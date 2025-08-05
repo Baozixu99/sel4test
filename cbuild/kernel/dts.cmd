@@ -1,0 +1,1 @@
+regen /home/b/test/sel4test/cbuild/kernel/kernel.dtb /home/b/test/sel4test/kernel/tools/dts/phytium-pi.dts;/home/b/test/sel4test/kernel/src/plat/phytium-pi/overlay-phytium-pi.dts

@@ -1,0 +1,12 @@
+devices:
+- end: 0x30800000
+  start: 0x0
+- end: 0x30880000
+  start: 0x30810000
+- end: 0x80000000
+  start: 0x30900000
+- end: 0x10000000000
+  start: 0x100000000
+memory:
+- end: 0x100000000
+  start: 0x80000000

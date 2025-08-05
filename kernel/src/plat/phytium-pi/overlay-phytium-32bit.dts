@@ -1,0 +1,13 @@
+/*
+ * Copyright 2025, seL4 Project
+ *
+ * SPDX-License-Identifier: GPL-2.0-only
+ */
+
+/ {
+    memory@80000000 {
+        device_type = "memory";
+        // Limit memory to 1GB for 32-bit mode
+        reg = <0x00 0x80000000 0x00 0x40000000>;
+    };
+};
