@@ -57,17 +57,17 @@ struct elfloader_device elfloader_devices[] = {
 
 struct elfloader_cpu elfloader_cpus[] = {
     {
-        /* /cpus/cpu@0 */
-        .compat = "phytium,ftc310",
+        /* /cpus/cpu@100 */
+        .compat = "phytium,ftc664",
         .enable_method = "psci",
-        .cpu_id = 0x200,
+        .cpu_id = 0x0,
         .extra_data = PSCI_METHOD_SMC
     },
     {
-        /* /cpus/cpu@1 */
-        .compat = "phytium,ftc310",
+        /* /cpus/cpu@101 */
+        .compat = "phytium,ftc664",
         .enable_method = "psci",
-        .cpu_id = 0x201,
+        .cpu_id = 0x100,
         .extra_data = PSCI_METHOD_SMC
     },
     { .compat = NULL /* sentinel */ },

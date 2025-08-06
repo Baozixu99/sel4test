@@ -1505,7 +1505,7 @@ GIT_EXECUTABLE-ADVANCED:INTERNAL=1
 HARDWARE_GEN_PATH-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: HardwareDebugAPI
 HardwareDebugAPI-ADVANCED:INTERNAL=1
-IMAGE_START_ADDR:INTERNAL=0x90100000
+IMAGE_START_ADDR:INTERNAL=0xc0000000
 //ADVANCED property for variable: INVOCATION_ID_GEN_PATH
 INVOCATION_ID_GEN_PATH-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: INVOCATION_JSON_GEN_PATH
@@ -1546,15 +1546,15 @@ KernelArchArmV7ve:INTERNAL=OFF
 KernelArchArmV8a:INTERNAL=ON
 KernelArch_all_strings:INTERNAL=arm;riscv;x86
 KernelArmArmV:INTERNAL=armv8-a
-KernelArmCPU:INTERNAL=cortex-a55
+KernelArmCPU:INTERNAL=cortex-a72
 KernelArmCacheLineSizeBits:INTERNAL=6
 KernelArmCortexA15:INTERNAL=OFF
 KernelArmCortexA35:INTERNAL=OFF
 KernelArmCortexA53:INTERNAL=OFF
-KernelArmCortexA55:INTERNAL=ON
+KernelArmCortexA55:INTERNAL=OFF
 KernelArmCortexA57:INTERNAL=OFF
 KernelArmCortexA7:INTERNAL=OFF
-KernelArmCortexA72:INTERNAL=OFF
+KernelArmCortexA72:INTERNAL=ON
 KernelArmCortexA8:INTERNAL=OFF
 KernelArmCortexA9:INTERNAL=OFF
 //Disable the trapping of WFI     and WFE instructions when configuring
@@ -1628,10 +1628,10 @@ KernelArmHypEnableVCPUCP14SaveAndRestore:INTERNAL=OFF
 KernelArmHypEnableVCPUCP14SaveAndRestore_DISABLED:INTERNAL=TRUE
 //ADVANCED property for variable: KernelArmHypervisorSupport
 KernelArmHypervisorSupport-ADVANCED:INTERNAL=1
-KernelArmICacheVIPT:INTERNAL=ON
+KernelArmICacheVIPT:INTERNAL=
 KernelArmMach:INTERNAL=phytium
-KernelArmPASizeBits40:INTERNAL=ON
-KernelArmPASizeBits44:INTERNAL=OFF
+KernelArmPASizeBits40:INTERNAL=OFF
+KernelArmPASizeBits44:INTERNAL=ON
 //Enable SystemMMU
 KernelArmSMMU:INTERNAL=OFF
 KernelArmSMMU_DISABLED:INTERNAL=TRUE
@@ -1683,7 +1683,7 @@ KernelCtzNoBuiltin-ADVANCED:INTERNAL=1
 //Location of kernel DTB file
 KernelDTBPath:INTERNAL=/home/b/test/sel4test/cbuild/kernel/kernel.dtb
 //Size of DTB blob, in bytes
-KernelDTBSize:INTERNAL= 27899
+KernelDTBSize:INTERNAL= 6428
 //ADVANCED property for variable: KernelDangerousCodeInjection
 KernelDangerousCodeInjection-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: KernelDebugBuild
@@ -1749,7 +1749,7 @@ KernelOptimisationO3:INTERNAL=OFF
 KernelOptimisationOS:INTERNAL=OFF
 KernelOptimisation_all_strings:INTERNAL=-O2;-Os;-O0;-O1;-O3
 KernelPC99TSCFrequency_UNAVAILABLE:INTERNAL=ON
-KernelPaddrUserTop:INTERNAL=1099511627776
+KernelPaddrUserTop:INTERNAL=17592186044416
 //ADVANCED property for variable: KernelPlatform
 KernelPlatform-ADVANCED:INTERNAL=1
 //STRINGS property for variable: KernelPlatform

@@ -51,13 +51,13 @@
 /* disabled: CONFIG_ARM_CORTEX_A15 */
 /* disabled: CONFIG_ARM_CORTEX_A35 */
 /* disabled: CONFIG_ARM_CORTEX_A53 */
+/* disabled: CONFIG_ARM_CORTEX_A55 */
 /* disabled: CONFIG_ARM_CORTEX_A57 */
-/* disabled: CONFIG_ARM_CORTEX_A72 */
 /* disabled: CONFIG_ARCH_ARM_V7A */
 /* disabled: CONFIG_ARCH_ARM_V7VE */
 /* disabled: CONFIG_AARCH64_SERROR_IGNORE */
 /* disabled: CONFIG_KERNEL_MCS */
-/* disabled: CONFIG_ARM_PA_SIZE_BITS_44 */
+/* disabled: CONFIG_ARM_PA_SIZE_BITS_40 */
 /* disabled: CONFIG_DEBUG_DISABLE_L2_CACHE */
 /* disabled: CONFIG_DEBUG_DISABLE_L1_ICACHE */
 /* disabled: CONFIG_DEBUG_DISABLE_L1_DCACHE */
@@ -263,7 +263,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
        
-/* Cortex-A55 Manual */
+/* Cortex-A72 Manual, Section 10.3 */
 /* otherwise this is defined at the arch level */
 /* EL2 kernel address map:
  *
@@ -441,10 +441,10 @@
  */
        
 ENTRY(_start)
-KERNEL_OFFSET = ((0xffffff8000000000 - 0x0) + 0x80000000) - 0x80000000;
+KERNEL_OFFSET = ((0xffffff8000000000 - 0x0) + 0xb0000000) - 0xb0000000;
 SECTIONS
 {
-    . = ((0xffffff8000000000 - 0x0) + 0x80000000);
+    . = ((0xffffff8000000000 - 0x0) + 0xb0000000);
     .boot . : AT(ADDR(.boot) - KERNEL_OFFSET)
     {
         *(.boot.text)

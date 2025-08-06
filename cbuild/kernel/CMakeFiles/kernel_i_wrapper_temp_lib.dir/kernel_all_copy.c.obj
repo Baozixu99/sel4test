@@ -81,17 +81,17 @@
 /* disabled: CONFIG_ARM_CORTEX_A15 */
 /* disabled: CONFIG_ARM_CORTEX_A35 */
 /* disabled: CONFIG_ARM_CORTEX_A53 */
-
+/* disabled: CONFIG_ARM_CORTEX_A55 */
 /* disabled: CONFIG_ARM_CORTEX_A57 */
-/* disabled: CONFIG_ARM_CORTEX_A72 */
+
 /* disabled: CONFIG_ARCH_ARM_V7A */
 /* disabled: CONFIG_ARCH_ARM_V7VE */
 
 /* disabled: CONFIG_AARCH64_SERROR_IGNORE */
 
 /* disabled: CONFIG_KERNEL_MCS */
+/* disabled: CONFIG_ARM_PA_SIZE_BITS_40 */
 
-/* disabled: CONFIG_ARM_PA_SIZE_BITS_44 */
 
 /* disabled: CONFIG_DEBUG_DISABLE_L2_CACHE */
 /* disabled: CONFIG_DEBUG_DISABLE_L1_ICACHE */
@@ -4417,7 +4417,7 @@ typedef word_t vm_fault_type_t;
        
 
 
-# 1 "/home/b/test/sel4test/kernel/libsel4/arch_include/arm/sel4/arch/constants_cortex_a55.h" 1
+# 1 "/home/b/test/sel4test/kernel/libsel4/arch_include/arm/sel4/arch/constants_cortex_a72.h" 1
 /*
  * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
@@ -4432,7 +4432,7 @@ typedef word_t vm_fault_type_t;
 
 
 
-/* Cortex-A55 Manual */
+/* Cortex-A72 Manual, Section 10.3 */
 # 11 "/home/b/test/sel4test/kernel/libsel4/sel4_plat_include/phytium-pi/sel4/plat/api/constants.h" 2
 
 
@@ -5236,7 +5236,7 @@ bool_t Arch_handleFaultReply(tcb_t *receiver, tcb_t *sender, word_t faultType);
    overflow without going into address ranges that are non-canonical.  These static
    asserts check that the kernel config won't lead to UTs being created that aren't
    representable. */
-_Static_assert(1099511627776 <= (1ul << (47)), "ut_max_less_than_canonical");;
+_Static_assert(17592186044416 <= (1ul << (47)), "ut_max_less_than_canonical");;
 # 19 "/home/b/test/sel4test/cbuild/kernel/gen_headers/plat/machine/devices_gen.h" 2
 # 1 "/home/b/test/sel4test/kernel/include/linker.h" 1
 /*
@@ -5288,7 +5288,7 @@ _Static_assert(1099511627776 <= (1ul << (47)), "ut_max_less_than_canonical");;
  */
 static inline __attribute__((__const__)) word_t physBase(void)
 {
-    return 0x80000000;
+    return 0xb0000000;
 }
 
 /* INTERRUPTS */
@@ -6338,10 +6338,15 @@ static const kernel_frame_t __attribute__((__section__(".boot.rodata"))) kernel_
 
 /* PHYSICAL MEMORY */
 static const p_region_t __attribute__((__section__(".boot.rodata"))) avail_p_regs[] = {
-    /* /memory@80000000 */
+    /* /memory@b0000000 */
     {
-        .start = 0x80000000,
-        .end = 0x100000000
+        .start = 0xb0000000,
+        .end = 0xde000000
+    },
+    /* /memory@b0000000 */
+    {
+        .start = 0xde420000,
+        .end = 0xe0000000
     },
 };
 # 8 "/home/b/test/sel4test/kernel/include/plat/default/plat/machine.h" 2
@@ -18072,9 +18077,9 @@ __attribute__((__section__(".boot.text"))) bool_t create_untypeds(cap_t root_cno
         start = ndks_boot.reserved[i].end;
     }
 
-    if (start < 1099511627776) {
+    if (start < 17592186044416) {
         region_t reg = paddr_to_pptr_reg((p_region_t) {
-            start, 1099511627776
+            start, 17592186044416
         });
 
         if (!create_untypeds_for_region(root_cnode_cap, true, reg, first_untyped_slot)) {
