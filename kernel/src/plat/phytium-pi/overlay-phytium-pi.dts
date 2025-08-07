@@ -17,13 +17,18 @@
             &{/timer};
     };
 
-    /* Configure physical base address for Phytium Pi memory layout */
-    memory {
+
+    /* Reserve shared memory region for hypervisor communication */
+    reserved-memory {
         #address-cells = <2>;
         #size-cells = <2>;
-        /* Phytium Pi RAM starts at 0x80000000, set kernel base accordingly */
-        seL4,phys-base = <0x0 0x80200000>;
+        ranges;
+        
+        /* Shared memory region - must not be used by seL4 */
+        hvisor_shm: shm@de000000 {
+            compatible = "shared-dma-pool";
+            no-map;
+            reg = <0x0 0xde000000 0x0 0x420000>;
+        };
     };
-
-
 };

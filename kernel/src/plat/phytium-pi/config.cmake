@@ -8,8 +8,8 @@ declare_platform(phytium-pi KernelPlatformPhytiumPi PLAT_PHYTIUM_PI KernelArchAR
 
 if(KernelPlatformPhytiumPi)
     declare_seL4_arch(aarch64 aarch32)
-    # Phytium-Pi uses PE2204 SoC with FTC310 cores
-    set(KernelArmCortexA55 ON)  # FTC310 is compatible with Cortex-A55
+    # Phytium-Pi uses PE2204 SoC with FTC664 cores (dual-core configuration)
+    set(KernelArmCortexA72 ON)  # FTC664 is compatible with Cortex-A72
     set(KernelArchArmV8a ON)
     set(KernelArmGicV3 ON)
     # Enable user access to generic timer for ltimer support

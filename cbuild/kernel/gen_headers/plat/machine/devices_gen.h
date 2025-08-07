@@ -10,7 +10,7 @@
 
 #pragma once
 
-#define PHYS_BASE_RAW 0xb0000000
+#define PHYS_BASE_RAW 0xc0000000
 
 #ifndef __ASSEMBLER__
 
@@ -1077,13 +1077,13 @@ static const kernel_frame_t BOOT_RODATA kernel_device_frames[] = {
 static const p_region_t BOOT_RODATA avail_p_regs[] = {
     /* /memory@b0000000 */
     {
-        .start = 0xb0000000,
+        .start = 0xc0000000,
         .end   = 0xde000000
     },
     /* /memory@b0000000 */
     {
         .start = 0xde420000,
-        .end   = 0xe0000000
+        .end   = 0xf0000000
     },
 };
 

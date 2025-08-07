@@ -358,7 +358,7 @@
 
 	memory@b0000000 {
 		device_type = "memory";
-		reg = <0x0 0xb0000000 0x00 0x30000000>;
+		reg = <0x0 0xc0000000 0x00 0x30000000>;
 	};
 	reserved-memory {
 		#address-cells = <0x02>;
@@ -418,19 +418,6 @@
             &{/timer};
     };
 
-    /* Configure physical base address for Phytium Pi memory layout */
-    memory {
-        #address-cells = <2>;
-        #size-cells = <2>;
-        /* 
-         * Phytium Pi memory layout:
-         * - Total RAM: 0xb0000000 - 0xe0000000 (768MB, defined in main DTS)
-         * - Kernel load address: 0xb0200000 (leaves 2MB for bootloader)
-         * - Reserved memory: 0xde000000 - 0xde420000 (4.125MB for hypervisor)
-         * - Available for seL4: ~700MB between kernel and reserved region
-         */
-        seL4,phys-base = <0x0 0xc0400000>;
-    };
 
     /* Reserve shared memory region for hypervisor communication */
     reserved-memory {

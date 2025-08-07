@@ -6,7 +6,7 @@
 ENTRY( _start )
 SECTIONS
 {
-    . = 0xc0000000;
+    . = 0xb0400000;
     _text = .;
     .start :
     {

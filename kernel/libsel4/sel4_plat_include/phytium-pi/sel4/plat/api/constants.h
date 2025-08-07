@@ -7,7 +7,7 @@
 #pragma once
 
 #include <sel4/config.h>
-#include <sel4/arch/constants_cortex_a55.h>
+#include <sel4/arch/constants_cortex_a72.h>
 
 #if CONFIG_WORD_SIZE == 32
 /* First address in the virtual address space that is not accessible to user level */

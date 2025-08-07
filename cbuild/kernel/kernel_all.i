@@ -5288,7 +5288,7 @@ _Static_assert(17592186044416 <= (1ul << (47)), "ut_max_less_than_canonical");;
  */
 static inline __attribute__((__const__)) word_t physBase(void)
 {
-    return 0xb0000000;
+    return 0xc0000000;
 }
 
 /* INTERRUPTS */
@@ -6340,13 +6340,13 @@ static const kernel_frame_t __attribute__((__section__(".boot.rodata"))) kernel_
 static const p_region_t __attribute__((__section__(".boot.rodata"))) avail_p_regs[] = {
     /* /memory@b0000000 */
     {
-        .start = 0xb0000000,
+        .start = 0xc0000000,
         .end = 0xde000000
     },
     /* /memory@b0000000 */
     {
         .start = 0xde420000,
-        .end = 0xe0000000
+        .end = 0xf0000000
     },
 };
 # 8 "/home/b/test/sel4test/kernel/include/plat/default/plat/machine.h" 2

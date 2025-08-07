@@ -75,8 +75,9 @@ function(ApplyData61ElfLoaderSettings kernel_platform kernel_sel4_arch)
         set(UseRiscVOpenSBI OFF CACHE BOOL "" FORCE)
     endif()
     if(KernelPlatformPhytiumPi)
-        # Use 0x90100000 to match U-Boot load address (hvisor reserved memory removed)
-        set(IMAGE_START_ADDR 0x90100000 CACHE INTERNAL "" FORCE)
+        # Use 0xc0000000 for ELF Loader, kernel will be loaded at 0xb0200000
+        # This gives 2MB space for ELF Loader which is sufficient
+        set(IMAGE_START_ADDR 0xb0400000 CACHE INTERNAL "" FORCE)
         if(KernelSel4ArchAarch32)
             set(ElfloaderArmV8LeaveAarch64 ON CACHE BOOL "" FORCE)
         endif()
