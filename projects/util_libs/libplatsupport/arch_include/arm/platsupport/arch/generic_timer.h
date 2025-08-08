@@ -103,4 +103,5 @@ static inline uintptr_t generic_timer_status(void)
 }
 
 int generic_timer_init(generic_timer_t *timer);
+int generic_timer_get_init(generic_timer_t *timer);
 uint64_t generic_timer_get_time(generic_timer_t *timer);

@@ -37,6 +37,7 @@ static int sender(seL4_Word ep, seL4_Word id, seL4_Word runs, seL4_Word arg3)
 
 static int test_notification_binding(env_t env)
 {
+    printf("##########################\n");
     helper_thread_t sync, notification;
 
     /* create endpoints */
