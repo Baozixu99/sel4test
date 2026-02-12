@@ -65,7 +65,7 @@ static int g_error_count = 0;
 /* 测试模式选择 */
 #define TEST_MODE_LISTEN    0  // 监听后端响应（原模式）
 #define TEST_MODE_FRONTEND  1  // 运行前端协议栈模拟器
-#define CURRENT_TEST_MODE   TEST_MODE_LISTEN  // 纯监听模式，不发送测试消息
+#define CURRENT_TEST_MODE   TEST_MODE_FRONTEND  // 纯监听模式，不发送测试消息
 
 /* ==================== 辅助函数 ==================== */
 

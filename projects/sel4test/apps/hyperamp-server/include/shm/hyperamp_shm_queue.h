@@ -18,6 +18,7 @@
 
 #define HYPERAMP_OK                     0
 #define HYPERAMP_ERROR                  (-1)
+#define HYPERAMP_AGAIN                  (-2)
 
 /* 内存映射模式 */
 typedef enum {
@@ -407,7 +408,7 @@ static inline int hyperamp_queue_enqueue(volatile HyperampShmQueue *queue,
     // 检查队列是否满
     if (new_header == tail) {
         hyperamp_spinlock_unlock(&queue->queue_lock);
-        return HYPERAMP_ERROR;
+        return HYPERAMP_AGAIN;
     }
     
     // 计算写入地址
@@ -478,7 +479,7 @@ static inline int hyperamp_queue_dequeue(volatile HyperampShmQueue *queue,
     // 检查队列是否为空
     if (tail == header) {
         hyperamp_spinlock_unlock(&queue->queue_lock);
-        return HYPERAMP_ERROR;
+        return HYPERAMP_AGAIN;
     }
     
     // 计算读取地址

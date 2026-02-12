@@ -7,7 +7,11 @@ mkdir cbuild && cd cbuild
 ninja
 //生成的镜像文件位于cbuild/Image/hyperamp-server-image-arm-phytium-pi
 ```
-
+在phytium pi平台上编译sel4test：
+```c
+../init-build.sh -DPLATFORM=phytium-pi -DAARCH64=1 -DKernelSel4Arch=aarch64 -DSel4testApp=hyperamp-server
+ninja
+```
 ---
 
 ## 1. 系统架构
