@@ -337,16 +337,16 @@ static BOOT_CODE void map_4MB_phys_to_vaddr(vspace_root_t *vspaceRoot,
         /* 在 PT 中写入 4KB 页表项 */
         pt += GET_UPT_INDEX(vptr, ULVL_FRM_ARM_PT_LVL(3));
         
-        /* HyperAMP: 对共享内存区域使用 uncached 映射 (Stage-1 for EL1 guest) */
+        /* HyperAMP: 4MB 数据区始终 DEVICE_nGnRnE (uncached) */
         word_t mem_attr;
-        if (cur_paddr >= SHM_TX_QUEUE_PADDR && cur_paddr < (SHM_DATA_PADDR + SHM_DATA_SIZE)) {
-            mem_attr = DEVICE_nGnRnE;  /* Stage-1: Uncached device memory for shared memory */
-            if (i == 0) {  /* 只打印第一页 */
-                printf("[HyperAMP] map_4MB: PA 0x%lx -> DEVICE_nGnRnE (uncached)\n", 
+        if (cur_paddr >= SHM_DATA_PADDR && cur_paddr < (SHM_DATA_PADDR + SHM_DATA_SIZE)) {
+            mem_attr = DEVICE_nGnRnE;
+            if (i == 0) {
+                printf("[HyperAMP] map_4MB: PA 0x%lx -> DEVICE_nGnRnE (uncached)\n",
                        (unsigned long)cur_paddr);
             }
         } else {
-            mem_attr = NORMAL;  /* Stage-1: Normal cacheable memory */
+            mem_attr = NORMAL;
         }
         
         *(pt) = pte_pte_4k_page_new(
@@ -395,15 +395,22 @@ static BOOT_CODE void map_it_frame_cap(cap_t vspace_cap, cap_t frame_cap, bool_t
     assert(pte_pte_table_ptr_get_present(pd));
     pt = paddr_to_pptr(pte_pte_table_ptr_get_pt_base_address(pd));
     
-    /* HyperAMP: 对共享内存区域使用 uncached 映射 (Stage-1 for EL1 guest) */
+    /* HyperAMP: 队列控制块用 NORMAL (支持 LDAXR/STLXR 原子指令)
+     *           数据区用 DEVICE_nGnRnE (uncached) */
     paddr_t frame_paddr = pptr_to_paddr(pptr);
     word_t mem_attr;
-    if (frame_paddr >= SHM_TX_QUEUE_PADDR && frame_paddr < (SHM_DATA_PADDR + SHM_DATA_SIZE)) {
-        mem_attr = DEVICE_nGnRnE;  /* Stage-1: Uncached device memory for shared memory */
-        printf("[HyperAMP] map_it_frame_cap: PA 0x%lx -> DEVICE_nGnRnE (uncached)\n", 
+    if (frame_paddr >= SHM_TX_QUEUE_PADDR && frame_paddr < SHM_DATA_PADDR) {
+        /* TX/RX Queue 页: NORMAL WB (LDAXR/STLXR 要求) */
+        mem_attr = NORMAL;
+        printf("[HyperAMP] map_it_frame_cap: PA 0x%lx -> NORMAL (for spinlock atomics)\n",
+               (unsigned long)frame_paddr);
+    } else if (frame_paddr >= SHM_DATA_PADDR && frame_paddr < (SHM_DATA_PADDR + SHM_DATA_SIZE)) {
+        /* 数据区: DEVICE_nGnRnE (uncached) */
+        mem_attr = DEVICE_nGnRnE;
+        printf("[HyperAMP] map_it_frame_cap: PA 0x%lx -> DEVICE_nGnRnE (uncached)\n",
                (unsigned long)frame_paddr);
     } else {
-        mem_attr = NORMAL;  /* Stage-1: Normal cacheable memory */
+        mem_attr = NORMAL;
     }
     
     *(pt + GET_UPT_INDEX(vptr, ULVL_FRM_ARM_PT_LVL(3))) = pte_pte_4k_page_new(
