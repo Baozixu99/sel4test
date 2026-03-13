@@ -639,17 +639,6 @@ static BOOT_CODE bool_t try_init_kernel(
     // 内核直接映射区使用 cacheable 属性,会导致缓存不一致问题
     // 应该由用户空间程序通过 uncached 映射进行初始化
 
-    // 将共享内存虚拟地址传递给用户空间（与之前实现相同）
-    // store the first available vaddr in ipc buffer
-    seL4_Word *ipcBuf = (seL4_Word*)rootserver.ipc_buf;
-    *ipcBuf = (seL4_Word)(extra_bi_frame_vptr + extra_bi_size);
-    
-    // store shm: TX_Q RX_Q DATA vaddrs in first available addr
-    unsigned long long *addrMsg = (unsigned long long *)(rootserver.extra_bi + extra_bi_size);
-    const unsigned long long shmemComm_frame_vaddrs[] = 
-            {shm_tx_queue_vaddr, shm_rx_queue_vaddr, shm_data_vaddr};  
-    for (unsigned i = 0; i < 3; ++i) 
-        addrMsg[i] = shmemComm_frame_vaddrs[i];  
     /* create/initialise the initial thread's ASID pool */
     it_ap_cap = create_it_asid_pool(root_cnode_cap);
     if (cap_get_capType(it_ap_cap) == cap_null_cap) {
@@ -699,6 +688,25 @@ static BOOT_CODE bool_t try_init_kernel(
 
     /* finalise the bootinfo frame */
     bi_finalise();
+
+    // 将共享内存虚拟地址写入 IPC buffer 的 msg[2..4] 字段
+    // msg[0..1] 会被 sel4runtime 的 seL4_DebugNameThread("rootserver") 覆盖
+    // 用户空间通过 seL4_GetMR(2/3/4) 读取
+    // word_t *ipcBuf下标	对应结构体字段	seL4_GetMR(i)
+    // ipcBuf[0]	        tag	            —
+    // ipcBuf[1]	        msg[0]	    seL4_GetMR(0)
+    // ipcBuf[2]	        msg[1]	    seL4_GetMR(1)
+    // ipcBuf[3]	        msg[2]	    seL4_GetMR(2)
+    // ipcBuf[4]	        msg[3]	    seL4_GetMR(3)
+    // ipcBuf[5]	        msg[4]	    seL4_GetMR(4)
+    {
+        word_t *ipcBuf = (word_t *)rootserver.ipc_buf;
+        ipcBuf[3] = shm_tx_queue_vaddr;   // msg[2]
+        ipcBuf[4] = shm_rx_queue_vaddr;   // msg[3]
+        ipcBuf[5] = shm_data_vaddr;       // msg[4]
+        printf("kernel: IPC buffer msg[2..4] = 0x%lx, 0x%lx, 0x%lx\n",
+               ipcBuf[3], ipcBuf[4], ipcBuf[5]);
+    }
 
     /* Flushing the L1 cache and invalidating the TLB is good enough here to
      * make sure everything written by the kernel is visible to userland. There

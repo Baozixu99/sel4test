@@ -956,28 +956,18 @@ int main(void)
     printf("  Compatible with HighSpeedCProxy\n");
     printf("================================================\n\n");
 
-    // 从 IPC buffer 获取共享内存地址
-    // boot.c 存储方式: IPC buffer 第一个 word 存储指向地址数组的指针
-    // 该数组包含: [TX Queue vaddr, RX Queue vaddr, Data Region vaddr]
-    seL4_Word *ipc_buf = (seL4_Word *)seL4_GetIPCBuffer();
-    unsigned long long *vaddrs = (unsigned long long *)*ipc_buf;
-    
-    // HyperAMP 4KB 队列布局 (与 Linux 端和内核配置匹配)
-    // 正确的架构：
-    // - TX Queue (0xDE000000): seL4 → Linux (seL4 前端发送请求，Linux 后端接收)
-    // - RX Queue (0xDE001000): Linux → seL4 (Linux 后端发送响应，seL4 前端接收)
+    // 从 IPC buffer msg[] 字段读取共享内存虚拟地址
+    // boot.c 写入 msg[2..4], 因为 sel4runtime 的 seL4_DebugNameThread
+    // 会将 "rootserver" 写入 msg[0..1]
+    //**不要在seL4_GetMR() 之前插入任何 seL4 系统调用，否则地址会被覆盖掉！！！
+    g_tx_queue    = (volatile HyperampShmQueue *)seL4_GetMR(2);  // TX: seL4 → Linux
+    g_rx_queue    = (volatile HyperampShmQueue *)seL4_GetMR(3);  // RX: Linux → seL4
+    g_data_region = (volatile void *)            seL4_GetMR(4);  // Data Region: 4MB
 
-    // g_tx_queue = (volatile HyperampShmQueue *)vaddrs[0];    // TX: seL4 → Linux (seL4 写请求)
-    // g_rx_queue = (volatile HyperampShmQueue *)vaddrs[1];    // RX: Linux → seL4 (seL4 读响应)
-    // g_data_region = (volatile void *)vaddrs[2];             // Data Region: 4MB
-    g_tx_queue = (volatile HyperampShmQueue *)0x54e000;
-    g_rx_queue = (volatile HyperampShmQueue *)0x54f000;
-    g_data_region = (volatile void *)0x550000;
-    
-    printf("[seL4] Shared Memory Addresses:\n");
-    printf("  TX Queue[0xde000000] (seL4->Linux): %p\n", (void *)g_tx_queue);
-    printf("  RX Queue[0xde001000] (Linux->seL4): %p\n", (void *)g_rx_queue);
-    printf("  Data Region: %p (shared 4MB)\n", (void *)g_data_region);
+    printf("[seL4] Shared Memory Addresses (from IPC msg[2..4]):\n");
+    printf("  TX Queue (seL4->Linux): %p\n", (void *)g_tx_queue);
+    printf("  RX Queue (Linux->seL4): %p\n", (void *)g_rx_queue);
+    printf("  Data Region  :          %p\n", (void *)g_data_region);
     
     // 验证地址有效性
     if (!g_tx_queue || !g_rx_queue || !g_data_region) {
