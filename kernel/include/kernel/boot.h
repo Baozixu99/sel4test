@@ -106,8 +106,8 @@ typedef struct {
     pptr_t vspace;
     pptr_t asid_pool;
     pptr_t ipc_buf;
-    pptr_t shm_root_queue;
-    pptr_t shm_sel4_queue;
+    pptr_t shm_root_queue[3];
+    pptr_t shm_sel4_queue[3];
     pptr_t shm_data;
     pptr_t boot_info;
     pptr_t extra_bi;

@@ -339,12 +339,12 @@ static BOOT_CODE void map_4MB_phys_to_vaddr(vspace_root_t *vspaceRoot,
         
         /* HyperAMP: 4MB 数据区始终 DEVICE_nGnRnE (uncached) */
         word_t mem_attr;
-        if (cur_paddr >= SHM_DATA_PADDR && cur_paddr < (SHM_DATA_PADDR + SHM_DATA_SIZE)) {
+        if (cur_paddr == SHM_TX_QUEUE_PADDR || cur_paddr == SHM_RX_QUEUE_PADDR ||
+            cur_paddr == SHM_TX_QUEUE_PADDR + 0x200000UL || cur_paddr == SHM_TX_QUEUE_PADDR + 0x201000UL ||
+            cur_paddr == SHM_TX_QUEUE_PADDR + 0x300000UL || cur_paddr == SHM_TX_QUEUE_PADDR + 0x301000UL) {
+            mem_attr = NORMAL;
+        } else if (cur_paddr >= SHM_TX_QUEUE_PADDR && cur_paddr < SHM_TX_QUEUE_PADDR + 0x400000UL) {
             mem_attr = DEVICE_nGnRnE;
-            if (i == 0) {
-                printf("[HyperAMP] map_4MB: PA 0x%lx -> DEVICE_nGnRnE (uncached)\n",
-                       (unsigned long)cur_paddr);
-            }
         } else {
             mem_attr = NORMAL;
         }
@@ -399,16 +399,14 @@ static BOOT_CODE void map_it_frame_cap(cap_t vspace_cap, cap_t frame_cap, bool_t
      *           数据区用 DEVICE_nGnRnE (uncached) */
     paddr_t frame_paddr = pptr_to_paddr(pptr);
     word_t mem_attr;
-    if (frame_paddr >= SHM_TX_QUEUE_PADDR && frame_paddr < SHM_DATA_PADDR) {
-        /* TX/RX Queue 页: NORMAL WB (LDAXR/STLXR 要求) */
+    if (frame_paddr == SHM_TX_QUEUE_PADDR || frame_paddr == SHM_RX_QUEUE_PADDR ||
+        frame_paddr == SHM_TX_QUEUE_PADDR + 0x200000UL || frame_paddr == SHM_TX_QUEUE_PADDR + 0x201000UL ||
+        frame_paddr == SHM_TX_QUEUE_PADDR + 0x300000UL || frame_paddr == SHM_TX_QUEUE_PADDR + 0x301000UL) {
         mem_attr = NORMAL;
-        printf("[HyperAMP] map_it_frame_cap: PA 0x%lx -> NORMAL (for spinlock atomics)\n",
-               (unsigned long)frame_paddr);
-    } else if (frame_paddr >= SHM_DATA_PADDR && frame_paddr < (SHM_DATA_PADDR + SHM_DATA_SIZE)) {
-        /* 数据区: DEVICE_nGnRnE (uncached) */
+        printf("[HyperAMP] map_it_frame_cap: PA 0x%lx -> NORMAL (for spinlock atomics)\n", (unsigned long)frame_paddr);
+    } else if (frame_paddr >= SHM_TX_QUEUE_PADDR && frame_paddr < SHM_TX_QUEUE_PADDR + 0x400000UL) {
         mem_attr = DEVICE_nGnRnE;
-        printf("[HyperAMP] map_it_frame_cap: PA 0x%lx -> DEVICE_nGnRnE (uncached)\n",
-               (unsigned long)frame_paddr);
+        printf("[HyperAMP] map_it_frame_cap: PA 0x%lx -> DEVICE_nGnRnE (uncached)\n", (unsigned long)frame_paddr);
     } else {
         mem_attr = NORMAL;
     }

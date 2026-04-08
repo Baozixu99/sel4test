@@ -572,68 +572,66 @@ static BOOT_CODE bool_t try_init_kernel(
     //variable definition
     cap_t shm_tx_queue_cap, shm_rx_queue_cap;
     
-    // 计算虚拟地址 (页面对齐) - 使用原始计算方式
+    // 计算虚拟地址 (2MB + 1MB + 1MB 级联映射)
     vptr_t shm_tx_queue_vaddr = ((extra_bi_frame_vptr + extra_bi_size_bits + BIT(PAGE_BITS) * 2) >> PAGE_BITS) << PAGE_BITS;
-    vptr_t shm_rx_queue_vaddr = shm_tx_queue_vaddr + BIT(PAGE_BITS);  // TX 队列后 4KB (1页)
-    vptr_t shm_data_vaddr = shm_rx_queue_vaddr + BIT(PAGE_BITS);      // RX 队列后 4KB (1页)
+    vptr_t shm_rx_queue_vaddr = shm_tx_queue_vaddr + BIT(PAGE_BITS); 
+    
+    // 给 3 对队列 (6个页) 以及后面对齐预留足够空间 
+    vptr_t shm_data_vaddr = shm_tx_queue_vaddr + 8 * BIT(PAGE_BITS);
+    
+    uint64_t channel_offsets[3] = {0, 0x200000UL, 0x300000UL}; // 0M, 2M, 3M
 
-    // HyperAMP 4KB 队列布局 (HYPERAMP_MAX_MAP_TABLE_ENTRIES=125):
-    // TX Queue (Linux → seL4): phys 0xDE000000, virt shm_tx_queue_vaddr, size 4KB
-    // RX Queue (seL4 → Linux): phys 0xDE001000, virt shm_rx_queue_vaddr, size 4KB
-    // Data Region:             phys 0xDE002000, virt shm_data_vaddr,      size 4MB
-    
-    rootserver.shm_root_queue = (pptr_t)paddr_to_pptr(SHM_TX_QUEUE_PADDR);  // TX Queue
-    rootserver.shm_sel4_queue = (pptr_t)paddr_to_pptr(SHM_RX_QUEUE_PADDR);  // RX Queue
+    for (int i = 0; i < 3; i++)
+    {
+        paddr_t tx_pa = SHM_TX_QUEUE_PADDR + channel_offsets[i];
+        paddr_t rx_pa = SHM_TX_QUEUE_PADDR + channel_offsets[i] + 0x1000UL;
         
-    // 创建 TX Queue 映射 (Linux → seL4, 4KB)
-    shm_tx_queue_cap = create_ShmemCommbuf_frame_cap(root_cnode_cap, it_pd_cap, 
-                                                      shm_tx_queue_vaddr,
-                                                      rootserver.shm_root_queue,
-                                                      seL4_CapInitThreadShm_root_q);
-    if (cap_get_capType(shm_tx_queue_cap) == cap_null_cap) {
-        printf("ERROR: could not create TX queue (4KB) for initial thread\n");
-        return false;
+        rootserver.shm_root_queue[i] = (pptr_t)paddr_to_pptr(tx_pa);  // TX Queue
+        rootserver.shm_sel4_queue[i] = (pptr_t)paddr_to_pptr(rx_pa);  // RX Queue
+        
+        // 动态计算每个通道的 Capabilities Slots
+        uint32_t slot_tx = seL4_CapInitThreadShm_root_q + 2 * i;
+        uint32_t slot_rx = seL4_CapInitThreadShm_root_q + 2 * i + 1;
+
+        // 创建 TX Queue 映射 (Linux → seL4, 4KB)
+        shm_tx_queue_cap = create_ShmemCommbuf_frame_cap(root_cnode_cap, it_pd_cap,
+                                                        shm_tx_queue_vaddr,
+                                                        rootserver.shm_root_queue[i],
+                                                        slot_tx);
+        
+        // 创建 RX Queue 映射 (seL4 → Linux, 4KB)
+        shm_rx_queue_cap = create_ShmemCommbuf_frame_cap(root_cnode_cap, it_pd_cap,
+                                                        shm_rx_queue_vaddr,
+                                                        rootserver.shm_sel4_queue[i],
+                                                        slot_rx);
+
+        if ((cap_get_capType(shm_rx_queue_cap) == cap_null_cap)
+            ||(cap_get_capType(shm_tx_queue_cap) == cap_null_cap)) {
+            printf("ERROR: could not create TX/RX queue (4KB) for initial thread\n");
+            return false;
+        }
+        shm_tx_queue_vaddr += 2 * BIT(PAGE_BITS); 
+        shm_rx_queue_vaddr += 2 * BIT(PAGE_BITS);
     }
+        
+    printf("boot.c HyperAMP Compact 3-Channel Layout:\n");
     
-    // 创建 RX Queue 映射 (seL4 → Linux, 4KB)
-    shm_rx_queue_cap = create_ShmemCommbuf_frame_cap(root_cnode_cap, it_pd_cap, 
-                                                      shm_rx_queue_vaddr,
-                                                      rootserver.shm_sel4_queue,
-                                                      seL4_CapInitThreadShm_sel4_q);
-    if (cap_get_capType(shm_rx_queue_cap) == cap_null_cap) {
-        printf("ERROR: could not create RX queue (4KB) for initial thread\n");
-        return false;
-    }
+    // 一次性给从 0x7E000000 开始的整个 4MB 切分盘打通物理到虚拟的地基
+    // 内部的队列页面会被 vspace.c 解析为 NORMAL，数据区被解析为 DEVICE
+    map_4MB_phys_to_vaddr((vspace_root_t *)rootserver.vspace, SHM_TX_QUEUE_PADDR, shm_data_vaddr, 0);
+
+    // 打印关键映射地址，方便调试追踪
+    printf("[Kernel] CH0 VADDR Mapping => TX: 0x%lx (PA: 0x%lx)\n", shm_data_vaddr, SHM_TX_QUEUE_PADDR);
+    printf("[Kernel] CH0 VADDR Mapping => RX: 0x%lx (PA: 0x%lx)\n", shm_data_vaddr + 0x1000UL, SHM_TX_QUEUE_PADDR + 0x1000UL);
+    printf("[Kernel] CH0 VADDR Mapping => Data: 0x%lx (PA: 0x%lx)\n", shm_data_vaddr + 0x2000UL, SHM_TX_QUEUE_PADDR + 0x2000UL);
     
-    printf("boot.c HyperAMP 4KB Queue Layout:\n");
-    printf("  extra_bi_frame_vptr: 0x%lx\n", extra_bi_frame_vptr);
-    printf("  extra_bi_size_bits: %lu (0x%lx)\n", extra_bi_size_bits, extra_bi_size_bits);
-    printf("  BIT(PAGE_BITS): %lu\n", BIT(PAGE_BITS));
-    printf("  Calculation: (0x%lx + %lu + %lu*2) >> 12 << 12\n", 
-           extra_bi_frame_vptr, extra_bi_size_bits, BIT(PAGE_BITS));
-    printf("  TX Queue: paddr=0x%lx, vaddr=0x%lx, size=%d bytes\n", 
-           SHM_TX_QUEUE_PADDR, shm_tx_queue_vaddr, SHM_QUEUE_SIZE);
-    printf("  RX Queue: paddr=0x%lx, vaddr=0x%lx, size=%d bytes\n", 
-           SHM_RX_QUEUE_PADDR, shm_rx_queue_vaddr, SHM_QUEUE_SIZE);
-    printf("  Data Reg: paddr=0x%lx, vaddr=0x%lx, size=%d MB\n", 
-           SHM_DATA_PADDR, shm_data_vaddr, SHM_DATA_SIZE / (1024 * 1024));
-    printf("boot.c pv_offset 0x%lx\n", pv_offset);
-    printf("TX and RX queue mapped, mapping 4MB data region\n");
+    printf("[Kernel] CH1 VADDR Mapping => TX: 0x%lx (PA: 0x%lx)\n", shm_data_vaddr + 0x200000UL, SHM_TX_QUEUE_PADDR + 0x200000UL);
+    printf("[Kernel] CH1 VADDR Mapping => RX: 0x%lx (PA: 0x%lx)\n", shm_data_vaddr + 0x201000UL, SHM_TX_QUEUE_PADDR + 0x201000UL);
+    printf("[Kernel] CH1 VADDR Mapping => Data: 0x%lx (PA: 0x%lx)\n", shm_data_vaddr + 0x202000UL, SHM_TX_QUEUE_PADDR + 0x202000UL);
     
-    // 映射 4MB 数据区 (保持原有实现)
-    p_region_t shm_data_p_reg = (p_region_t) {
-        SHM_DATA_PADDR, SHM_DATA_PADDR + SHM_DATA_SIZE
-    };
-    region_t shm_data_reg = paddr_to_pptr_reg(shm_data_p_reg);
-    
-    v_region_t shm_data_v_reg = {
-        .start = shm_data_vaddr,
-        .end   = shm_data_vaddr + SHM_DATA_SIZE
-    };
-    
-    printf("data pptr 0x%lx vaddr 0x%lx\n", shm_data_reg.start, shm_data_v_reg.start);
-    map_4MB_phys_to_vaddr((vspace_root_t *)rootserver.vspace, SHM_DATA_PADDR, shm_data_vaddr, 0);
-    printf("data pptr 0x%lx vaddr 0x%lx\n", shm_data_reg.start, shm_data_v_reg.start);
+    printf("[Kernel] CH2 VADDR Mapping => TX: 0x%lx (PA: 0x%lx)\n", shm_data_vaddr + 0x300000UL, SHM_TX_QUEUE_PADDR + 0x300000UL);
+    printf("[Kernel] CH2 VADDR Mapping => RX: 0x%lx (PA: 0x%lx)\n", shm_data_vaddr + 0x301000UL, SHM_TX_QUEUE_PADDR + 0x301000UL);
+    printf("[Kernel] CH2 VADDR Mapping => Data: 0x%lx (PA: 0x%lx)\n", shm_data_vaddr + 0x302000UL, SHM_TX_QUEUE_PADDR + 0x302000UL);
 
     // 注意: 不要在内核中直接写入共享内存!
     // 内核直接映射区使用 cacheable 属性,会导致缓存不一致问题
@@ -701,9 +699,9 @@ static BOOT_CODE bool_t try_init_kernel(
     // ipcBuf[5]	        msg[4]	    seL4_GetMR(4)
     {
         word_t *ipcBuf = (word_t *)rootserver.ipc_buf;
-        ipcBuf[3] = shm_tx_queue_vaddr;   // msg[2]
-        ipcBuf[4] = shm_rx_queue_vaddr;   // msg[3]
-        ipcBuf[5] = shm_data_vaddr;       // msg[4]
+        ipcBuf[3] = shm_data_vaddr;               // msg[2] (CH0 TX)
+        ipcBuf[4] = shm_data_vaddr + 0x1000UL;    // msg[3] (CH0 RX)
+        ipcBuf[5] = shm_data_vaddr + 0x2000UL;    // msg[4] (CH0 Data)
         printf("kernel: IPC buffer msg[2..4] = 0x%lx, 0x%lx, 0x%lx\n",
                ipcBuf[3], ipcBuf[4], ipcBuf[5]);
     }
