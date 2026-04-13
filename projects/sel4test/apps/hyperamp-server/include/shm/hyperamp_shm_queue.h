@@ -40,6 +40,7 @@ typedef enum {
 #if defined(__aarch64__) || defined(__arm__)
     #define HYPERAMP_DMB()   __asm__ volatile("dmb sy" ::: "memory")
     #define HYPERAMP_ISB()   __asm__ volatile("isb" ::: "memory")
+    #define HYPERAMP_CPU_RELAX() __asm__ volatile("yield" ::: "memory")
     
     /* 缓存操作 - 仅用于数据区 (DEVICE_nGnRnE uncached)，队列控制块由 LDAXR/STLXR 处理一致性 */
     static inline void hyperamp_cache_clean(volatile void *addr, size_t size) {
@@ -59,9 +60,24 @@ typedef enum {
         }
         __asm__ volatile("dsb sy" ::: "memory");
     }
+#elif defined(__riscv)
+    #define HYPERAMP_DMB()   __asm__ volatile("fence rw, rw" ::: "memory")
+    #define HYPERAMP_ISB()   __asm__ volatile("fence.i" ::: "memory")
+    #define HYPERAMP_CPU_RELAX() __asm__ volatile("nop" ::: "memory")
+
+    static inline void hyperamp_cache_clean(volatile void *addr, size_t size) {
+        (void)addr; (void)size;
+        __asm__ volatile("fence rw, rw" ::: "memory");
+    }
+
+    static inline void hyperamp_cache_invalidate(volatile void *addr, size_t size) {
+        (void)addr; (void)size;
+        __asm__ volatile("fence rw, rw" ::: "memory");
+    }
 #else
     #define HYPERAMP_DMB()   __asm__ volatile("mfence" ::: "memory")
     #define HYPERAMP_ISB()   __asm__ volatile("" ::: "memory")
+    #define HYPERAMP_CPU_RELAX() __asm__ volatile("pause" ::: "memory")
     
     static inline void hyperamp_cache_clean(volatile void *addr, size_t size) {
         (void)addr; (void)size;
@@ -129,7 +145,7 @@ static inline void hyperamp_spinlock_lock(volatile HyperampSpinlock *lock, uint3
             }
         }
         lock->contention_count++;
-        __asm__ volatile("pause" ::: "memory");
+        HYPERAMP_CPU_RELAX();
     }
 #endif
 }

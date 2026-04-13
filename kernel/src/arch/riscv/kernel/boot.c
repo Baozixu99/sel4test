@@ -21,6 +21,13 @@
 #include <plat/machine/hardware.h>
 #include <machine.h>
 
+#if defined(CONFIG_PLAT_HIFIVE_P550)
+#include <shared_memory.h>
+#define CONFIG_HYPERAMP_SHM_BOOT_INIT 1
+#else
+#define CONFIG_HYPERAMP_SHM_BOOT_INIT 0
+#endif
+
 #ifdef ENABLE_SMP_SUPPORT
 /* SMP boot synchronization works based on a global variable with the initial
  * value 0, as the loader must zero all BSS variables. Secondary cores keep
@@ -211,6 +218,7 @@ static BOOT_CODE bool_t try_init_kernel(
     vptr_t extra_bi_frame_vptr;
     vptr_t bi_frame_vptr;
     vptr_t ipcbuf_vptr;
+    vptr_t shm_tx_queue_vaddr = 0;
     create_frames_of_region_ret_t create_frames_ret;
     create_frames_of_region_ret_t extra_bi_ret;
 
@@ -274,10 +282,17 @@ static BOOT_CODE bool_t try_init_kernel(
 
     /* The region of the initial thread is the user image + ipcbuf + boot info + extra */
     word_t extra_bi_size_bits = calculate_extra_bi_size_bits(extra_bi_size);
+#if CONFIG_HYPERAMP_SHM_BOOT_INIT
+    vptr_t extra_bi_end_vptr = extra_bi_frame_vptr + (extra_bi_size_bits > 0 ? BIT(extra_bi_size_bits) : 0);
+    shm_tx_queue_vaddr = ROUND_UP(extra_bi_end_vptr, PAGE_BITS);
+#endif
     v_region_t it_v_reg = {
         .start = ui_v_reg.start,
         .end   = extra_bi_frame_vptr + (extra_bi_size_bits > 0 ? BIT(extra_bi_size_bits) : 0)
     };
+#if CONFIG_HYPERAMP_SHM_BOOT_INIT
+    it_v_reg.end = shm_tx_queue_vaddr + SHM_DATA_SIZE;
+#endif
     if (it_v_reg.end >= USER_TOP) {
         /* Variable arguments for printf() require well defined integer types
          * to work properly. Unfortunately, the definition of USER_TOP differs
@@ -393,6 +408,59 @@ static BOOT_CODE bool_t try_init_kernel(
     }
     ndks_boot.bi_frame->userImageFrames = create_frames_ret.region;
 
+#if CONFIG_HYPERAMP_SHM_BOOT_INIT
+    /* Map shared memory region into the initial thread VSpace.
+     * CH0 layout for userspace:
+     *   msg[2] -> TX queue @ shm_tx_queue_vaddr
+     *   msg[3] -> RX queue @ shm_tx_queue_vaddr + 0x1000
+     *   msg[4] -> data     @ shm_tx_queue_vaddr + 0x2000
+     */
+    for (word_t off = 0; off < SHM_DATA_SIZE; off += BIT(PAGE_BITS)) {
+        pptr_t shm_pptr = (pptr_t)paddr_to_pptr(SHM_TX_QUEUE_PADDR + off);
+        cap_t shm_cap = create_mapped_it_frame_cap(it_pd_cap,
+                                                   shm_pptr,
+                                                   shm_tx_queue_vaddr + off,
+                                                   IT_ASID,
+                                                   false,
+                                                   false);
+        if (cap_get_capType(shm_cap) == cap_null_cap) {
+            printf("ERROR: could not map shared memory page at PA 0x%"SEL4_PRIx_word"\n",
+                   SHM_TX_QUEUE_PADDR + off);
+            return false;
+        }
+    }
+
+        printf("[Kernel] CH0 VADDR Mapping => TX: 0x%lx (PA: 0x%lx)\n",
+            (unsigned long)shm_tx_queue_vaddr,
+            (unsigned long)SHM_TX_QUEUE_PADDR);
+        printf("[Kernel] CH0 VADDR Mapping => RX: 0x%lx (PA: 0x%lx)\n",
+            (unsigned long)(shm_tx_queue_vaddr + 0x1000UL),
+            (unsigned long)(SHM_TX_QUEUE_PADDR + 0x1000UL));
+        printf("[Kernel] CH0 VADDR Mapping => Data: 0x%lx (PA: 0x%lx)\n",
+            (unsigned long)(shm_tx_queue_vaddr + 0x2000UL),
+            (unsigned long)(SHM_TX_QUEUE_PADDR + 0x2000UL));
+
+        printf("[Kernel] CH1 VADDR Mapping => TX: 0x%lx (PA: 0x%lx)\n",
+            (unsigned long)(shm_tx_queue_vaddr + 0x200000UL),
+            (unsigned long)(SHM_TX_QUEUE_PADDR + 0x200000UL));
+        printf("[Kernel] CH1 VADDR Mapping => RX: 0x%lx (PA: 0x%lx)\n",
+            (unsigned long)(shm_tx_queue_vaddr + 0x201000UL),
+            (unsigned long)(SHM_TX_QUEUE_PADDR + 0x201000UL));
+        printf("[Kernel] CH1 VADDR Mapping => Data: 0x%lx (PA: 0x%lx)\n",
+            (unsigned long)(shm_tx_queue_vaddr + 0x202000UL),
+            (unsigned long)(SHM_TX_QUEUE_PADDR + 0x202000UL));
+
+        printf("[Kernel] CH2 VADDR Mapping => TX: 0x%lx (PA: 0x%lx)\n",
+            (unsigned long)(shm_tx_queue_vaddr + 0x300000UL),
+            (unsigned long)(SHM_TX_QUEUE_PADDR + 0x300000UL));
+        printf("[Kernel] CH2 VADDR Mapping => RX: 0x%lx (PA: 0x%lx)\n",
+            (unsigned long)(shm_tx_queue_vaddr + 0x301000UL),
+            (unsigned long)(SHM_TX_QUEUE_PADDR + 0x301000UL));
+        printf("[Kernel] CH2 VADDR Mapping => Data: 0x%lx (PA: 0x%lx)\n",
+            (unsigned long)(shm_tx_queue_vaddr + 0x302000UL),
+            (unsigned long)(SHM_TX_QUEUE_PADDR + 0x302000UL));
+#endif
+
     /* create the initial thread's ASID pool */
     it_ap_cap = create_it_asid_pool(root_cnode_cap);
     if (cap_get_capType(it_ap_cap) == cap_null_cap) {
@@ -436,6 +504,17 @@ static BOOT_CODE bool_t try_init_kernel(
 
     /* finalise the bootinfo frame */
     bi_finalise();
+
+#if CONFIG_HYPERAMP_SHM_BOOT_INIT
+    {
+        word_t *ipcBuf = (word_t *)rootserver.ipc_buf;
+        ipcBuf[3] = shm_tx_queue_vaddr;               /* msg[2] */
+        ipcBuf[4] = shm_tx_queue_vaddr + 0x1000UL;    /* msg[3] */
+        ipcBuf[5] = shm_tx_queue_vaddr + 0x2000UL;    /* msg[4] */
+        printf("kernel-riscv: IPC buffer msg[2..4] = 0x%"SEL4_PRIx_word", 0x%"SEL4_PRIx_word", 0x%"SEL4_PRIx_word"\n",
+               ipcBuf[3], ipcBuf[4], ipcBuf[5]);
+    }
+#endif
 
     ksNumCPUs = 1;
 
