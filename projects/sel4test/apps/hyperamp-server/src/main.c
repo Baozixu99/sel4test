@@ -41,7 +41,8 @@
 // HyperAMP 布局 (与 Linux 端和内核配置匹配)
 #define SHM_TX_QUEUE_SIZE       (4 * 1024)        // 4KB TX Queue
 #define SHM_RX_QUEUE_SIZE       (4 * 1024)        // 4KB RX Queue
-#define SHM_DATA_SIZE           (4 * 1024 * 1024)  // 4MB Data Region
+// 新通道 0 (CH0) 大小现在是 2MB（扣除 4KB RX + 4KB TX 队列后剩余作为数据区）
+#define SHM_DATA_SIZE           (2 * 1024 * 1024 - 8192)  // 适配 2MB 通道，数据区大小< 2MB
 
 
 #define ZONE_ID_LINUX           0
@@ -65,7 +66,7 @@ static int g_error_count = 0;
 /* 测试模式选择 */
 #define TEST_MODE_LISTEN    0  // 监听后端响应（原模式）
 #define TEST_MODE_FRONTEND  1  // 运行前端协议栈模拟器
-#define CURRENT_TEST_MODE   TEST_MODE_FRONTEND  // 纯监听模式，不发送测试消息
+#define CURRENT_TEST_MODE   TEST_MODE_LISTEN  // 纯监听模式，不发送测试消息
 
 /* ==================== 辅助函数 ==================== */
 
@@ -560,6 +561,11 @@ static int process_bulk_message(void *payload_ptr, size_t len)
     // 定位共享内存中的数据
     volatile uint8_t *data = (volatile uint8_t *)((uintptr_t)g_data_region + desc->offset);
     
+    // [关键修复]：因为 seL4 对通道内存的映射带有 NORMAL Cache 属性，
+    // 而 Linux 是 Uncached 直接写 RAM，所以处理前必须强制失效 (Invalidate) 本地缓存，
+    // 否则 seL4 会取到 CPU 缓存中的垃圾旧数据！
+    hyperamp_cache_invalidate((volatile void *)data, desc->length);
+    
     // 根据 service_id 处理
     switch (desc->service_id) {
         case SERVICE_ENCRYPT:
@@ -667,6 +673,10 @@ static int process_bulk_message(void *payload_ptr, size_t len)
             desc->status = 1;
             break;
     }
+    
+    // [关键修复]: 数据处理完成（在 CPU 缓存中）后，必须强制刷回 (Clean) 到物理内存 RAM，
+    // 否则 Uncached 模式的 Linux 读取时，依然会读到物理内存上老旧的垃圾数据（图像下半部分由于没能写回 RAM 就成了噪点）。
+    hyperamp_cache_clean((volatile void *)data, desc->length);
     
     return send_bulk_reply(desc);
 }
