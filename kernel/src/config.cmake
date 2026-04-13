@@ -39,7 +39,6 @@ add_sources(
         src/benchmark/benchmark_utilisation.c
         src/smp/lock.c
         src/smp/ipi.c
-        src/shared_memory.c
 )
 add_sources(
     DEP KernelIsMCS
