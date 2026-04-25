@@ -32,6 +32,10 @@ void fastpath_reply_recv(word_t cptr, word_t r_msgInfo)
 #endif
 NORETURN;
 
+static inline
+void fastpath_callBoost(word_t cptr, word_t r_msgInfo)
+NORETURN;
+
 /* Use macros to not break verification */
 #define endpoint_ptr_get_epQueue_tail_fp(ep_ptr) TCB_PTR(endpoint_ptr_get_epQueue_tail(ep_ptr))
 #define cap_vtable_cap_get_vspace_root_fp(vtable_cap) PTE_PTR(cap_page_table_cap_get_capPTBasePtr(vtable_cap))

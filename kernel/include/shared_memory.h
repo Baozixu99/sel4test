@@ -23,6 +23,12 @@
     #define SHM_RX_QUEUE_PADDR  0xDE001000UL
     #define SHM_DATA_PADDR      0xDE002000UL
 
+#elif defined(CONFIG_PLAT_HIFIVE_P550)
+    // HiFive_P550 平台共享内存配置
+    #define SHM_TX_QUEUE_PADDR  0x8EB00000UL
+    #define SHM_RX_QUEUE_PADDR  0x8EB01000UL
+    #define SHM_DATA_PADDR      0x8EB02000UL
+
 #else
     #error "Unknown Platform! Please define addresses for this board."
 #endif
