@@ -702,8 +702,16 @@ static BOOT_CODE bool_t try_init_kernel(
         ipcBuf[3] = shm_data_vaddr;               // msg[2] (CH0 TX)
         ipcBuf[4] = shm_data_vaddr + 0x1000UL;    // msg[3] (CH0 RX)
         ipcBuf[5] = shm_data_vaddr + 0x2000UL;    // msg[4] (CH0 Data)
-        printf("kernel: IPC buffer msg[2..4] = 0x%lx, 0x%lx, 0x%lx\n",
-               ipcBuf[3], ipcBuf[4], ipcBuf[5]);
+        ipcBuf[6] = shm_data_vaddr + 0x200000UL;  // msg[5]  (CH1 TX)
+        ipcBuf[7] = shm_data_vaddr + 0x201000UL;  // msg[6]  (CH1 RX)
+        ipcBuf[8] = shm_data_vaddr + 0x202000UL;  // msg[7]  (CH1 Data)
+        ipcBuf[9] = shm_data_vaddr + 0x300000UL;  // msg[8]  (CH2 TX)
+        ipcBuf[10] = shm_data_vaddr + 0x301000UL; // msg[9]  (CH2 RX)
+        ipcBuf[11] = shm_data_vaddr + 0x302000UL; // msg[10] (CH2 Data)
+        printf("kernel: IPC buffer msg[2..10] CH0/CH1/CH2 published\n");
+        printf("  CH0: 0x%lx, 0x%lx, 0x%lx\n", ipcBuf[3], ipcBuf[4], ipcBuf[5]);
+        printf("  CH1: 0x%lx, 0x%lx, 0x%lx\n", ipcBuf[6], ipcBuf[7], ipcBuf[8]);
+        printf("  CH2: 0x%lx, 0x%lx, 0x%lx\n", ipcBuf[9], ipcBuf[10], ipcBuf[11]);
     }
 
     /* Flushing the L1 cache and invalidating the TLB is good enough here to

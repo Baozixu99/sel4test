@@ -511,8 +511,19 @@ static BOOT_CODE bool_t try_init_kernel(
         ipcBuf[3] = shm_tx_queue_vaddr;               /* msg[2] */
         ipcBuf[4] = shm_tx_queue_vaddr + 0x1000UL;    /* msg[3] */
         ipcBuf[5] = shm_tx_queue_vaddr + 0x2000UL;    /* msg[4] */
-        printf("kernel-riscv: IPC buffer msg[2..4] = 0x%"SEL4_PRIx_word", 0x%"SEL4_PRIx_word", 0x%"SEL4_PRIx_word"\n",
-               ipcBuf[3], ipcBuf[4], ipcBuf[5]);
+     ipcBuf[6] = shm_tx_queue_vaddr + 0x200000UL;  /* msg[5]  CH1 TX */
+     ipcBuf[7] = shm_tx_queue_vaddr + 0x201000UL;  /* msg[6]  CH1 RX */
+     ipcBuf[8] = shm_tx_queue_vaddr + 0x202000UL;  /* msg[7]  CH1 Data */
+     ipcBuf[9] = shm_tx_queue_vaddr + 0x300000UL;  /* msg[8]  CH2 TX */
+     ipcBuf[10] = shm_tx_queue_vaddr + 0x301000UL; /* msg[9]  CH2 RX */
+     ipcBuf[11] = shm_tx_queue_vaddr + 0x302000UL; /* msg[10] CH2 Data */
+     printf("kernel-riscv: IPC buffer msg[2..10] CH0/CH1/CH2 published\n");
+     printf("  CH0: 0x%"SEL4_PRIx_word" 0x%"SEL4_PRIx_word" 0x%"SEL4_PRIx_word"\n",
+         ipcBuf[3], ipcBuf[4], ipcBuf[5]);
+     printf("  CH1: 0x%"SEL4_PRIx_word" 0x%"SEL4_PRIx_word" 0x%"SEL4_PRIx_word"\n",
+         ipcBuf[6], ipcBuf[7], ipcBuf[8]);
+     printf("  CH2: 0x%"SEL4_PRIx_word" 0x%"SEL4_PRIx_word" 0x%"SEL4_PRIx_word"\n",
+         ipcBuf[9], ipcBuf[10], ipcBuf[11]);
     }
 #endif
 
