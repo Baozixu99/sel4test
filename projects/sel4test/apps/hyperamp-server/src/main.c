@@ -38,27 +38,51 @@
 // #define SHM_RX_QUEUE_PADDR  0x7E001000UL
 // #define SHM_DATA_PADDR      0x7E002000UL
 
-// HyperAMP 布局 (与 Linux 端和内核配置匹配)
+// HyperAMP 布局 (与 Linux 端 and 内核配置匹配)
 #define SHM_TX_QUEUE_SIZE       (4 * 1024)        // 4KB TX Queue
 #define SHM_RX_QUEUE_SIZE       (4 * 1024)        // 4KB RX Queue
-// 新通道 0 (CH0) 大小现在是 2MB（扣除 4KB RX + 4KB TX 队列后剩余作为数据区）
-#define SHM_DATA_SIZE           (2 * 1024 * 1024 - 8192)  // 适配 2MB 通道，数据区大小< 2MB
 
+// 通道物理基址
+#define SHM_CH0_PADDR           0x7E000000UL
+#define SHM_CH1_PADDR           0x7E200000UL
+#define SHM_CH2_PADDR           0x7E300000UL
+
+// 通道偏移量 (与 boot.c 匹配)
+#define CH1_OFFSET              0x200000UL
+#define CH2_OFFSET              0x300000UL
+
+// 各通道数据区大小
+#define SHM_CH0_DATA_SIZE       (2 * 1024 * 1024 - 8192)
+#define SHM_CH1_DATA_SIZE       (1 * 1024 * 1024 - 8192)
+#define SHM_CH2_DATA_SIZE       (1 * 1024 * 1024 - 8192)
+
+static const uint32_t g_shm_data_sizes[3] = {
+    SHM_CH0_DATA_SIZE,
+    SHM_CH1_DATA_SIZE,
+    SHM_CH2_DATA_SIZE
+};
+
+static const uint64_t g_shm_paddrs[3] = {
+    SHM_CH0_PADDR,
+    SHM_CH1_PADDR,
+    SHM_CH2_PADDR
+};
 
 #define ZONE_ID_LINUX           0
 #define ZONE_ID_SEL4            1
 
 /* ==================== 全局变量 ==================== */
 
-// HyperAMP 双向通信 - 正确的架构理解：
-// - seL4 运行前端协议栈 (Frontend)：负责生成请求，处理响应
-// - Linux 运行后端协议栈 (Backend)：负责转发请求到网络，返回响应
-//
-// - TX Queue (0xDE000000): seL4 → Linux (seL4 前端发送请求，Linux 后端接收)
-// - RX Queue (0xDE001000): Linux → seL4 (Linux 后端发送响应，seL4 前端接收)
-static volatile HyperampShmQueue *g_tx_queue = NULL;  // seL4 → Linux (seL4 写请求,Linux读)
-static volatile HyperampShmQueue *g_rx_queue = NULL;  // Linux → seL4 (seL4 读响应，Linux写)
-volatile void *g_data_region = NULL;  // 共享数据区 (4MB)
+// HyperAMP 三通道管理
+static volatile HyperampShmQueue *g_tx_queues[3] = {NULL, NULL, NULL};
+static volatile HyperampShmQueue *g_rx_queues[3] = {NULL, NULL, NULL};
+static volatile void *g_data_regions[3] = {NULL, NULL, NULL};
+
+// 为了保持兼容性，保留原有的单指针名指向 CH0
+#define g_tx_queue g_tx_queues[0]
+#define g_rx_queue g_rx_queues[0]
+#define g_data_region g_data_regions[0]
+#define SHM_DATA_SIZE SHM_CH0_DATA_SIZE
 
 static int g_message_count = 0;
 static int g_error_count = 0;
@@ -103,8 +127,17 @@ static void print_string(const char *data, size_t len, size_t max_display)
 /* ==================== 服务处理函数 ==================== */
 
 // 前向声明
+static int send_reply_to_linux_idx(const char *reply_data, size_t reply_len, 
+                                   uint16_t frontend_sess, uint16_t backend_sess, int ch_idx);
+
+/**
+ * @brief 发送回复消息到 Linux (默认使用通道 0)
+ */
 static int send_reply_to_linux(const char *reply_data, size_t reply_len, 
-                                uint16_t frontend_sess, uint16_t backend_sess);
+                                uint16_t frontend_sess, uint16_t backend_sess)
+{
+    return send_reply_to_linux_idx(reply_data, reply_len, frontend_sess, backend_sess, 0);
+}
 
 /**
  * @brief Echo 服务 - 简单回显
@@ -496,16 +529,9 @@ static int process_message(volatile void *data_ptr, size_t length, uint16_t serv
     }
 }
 /**
- * @brief 发送 Bulk 处理结果给 Linux
- *
- * 将更新后的 HyperampBulkDescriptor 封装为
- * HYPERAMP_MSG_TYPE_BULK 消息，通过 TX Queue
- * 返回给 Linux，实际数据仍位于共享数据区。
- *
- * @param desc Bulk 描述符指针
- * @return HYPERAMP_OK / HYPERAMP_ERROR
+ * @brief 发送 Bulk 处理结果给 Linux (指定通道)
  */
-static int send_bulk_reply(HyperampBulkDescriptor *desc)
+static int send_bulk_reply_idx(HyperampBulkDescriptor *desc, int ch_idx)
 {
     HyperampMsgHeader msg_hdr = {
         .version = 1,
@@ -519,29 +545,22 @@ static int send_bulk_reply(HyperampBulkDescriptor *desc)
     hyperamp_safe_memcpy(msg_buf, &msg_hdr, sizeof(HyperampMsgHeader));
     hyperamp_safe_memcpy(msg_buf + sizeof(HyperampMsgHeader), desc, sizeof(HyperampBulkDescriptor));
     
-    volatile void *tx_data_base = g_data_region;
-    int ret = hyperamp_queue_enqueue(g_tx_queue, ZONE_ID_SEL4, msg_buf, 
+    volatile void *tx_data_base = g_data_regions[ch_idx];
+    int ret = hyperamp_queue_enqueue(g_tx_queues[ch_idx], ZONE_ID_SEL4, msg_buf, 
                                      sizeof(HyperampMsgHeader) + sizeof(HyperampBulkDescriptor), 
                                      tx_data_base);
     if (ret == HYPERAMP_OK) {
-        printf("[seL4] Bulk reply sent\n");
+        printf("[seL4] Bulk reply sent (CH%d)\n", ch_idx);
     } else {
-        printf("[seL4] Failed to send bulk reply\n");
+        printf("[seL4] Failed to send bulk reply (CH%d)\n", ch_idx);
     }
     return ret;
 }
+
 /**
- * @brief 处理 Bulk（零拷贝）消息
- *
- * 根据 Bulk 描述符中的 offset/length，
- * 直接对共享数据区中的数据进行加解密，
- * 并通过 Bulk 回复返回处理结果。
- *
- * @param payload_ptr Bulk 描述符指针
- * @param len payload 长度
- * @return HYPERAMP_OK / HYPERAMP_ERROR
+ * @brief 处理 Bulk（零拷贝）消息 (指定通道)
  */
-static int process_bulk_message(void *payload_ptr, size_t len)
+static int process_bulk_message_idx(void *payload_ptr, size_t len, int ch_idx)
 {
     if (len < sizeof(HyperampBulkDescriptor)) {
         printf("[seL4] Error: Bulk msg too short\n");
@@ -549,71 +568,54 @@ static int process_bulk_message(void *payload_ptr, size_t len)
     }
     
     HyperampBulkDescriptor *desc = (HyperampBulkDescriptor *)payload_ptr;
-    printf("[seL4] Processing Bulk: offset=0x%x, len=%u, service=%u\n", 
-           desc->offset, desc->length, desc->service_id);
+    printf("[seL4] Processing Bulk (CH%d): offset=0x%x, len=%u, service=%u\n", 
+           ch_idx, desc->offset, desc->length, desc->service_id);
     
-    if (desc->offset + desc->length > SHM_DATA_SIZE) {
+    if (desc->offset + desc->length > g_shm_data_sizes[ch_idx]) {
         printf("[seL4] Error: Bulk data out of bounds\n");
         desc->status = -1;
-        return send_bulk_reply(desc);
+        return send_bulk_reply_idx(desc, ch_idx);
     }
     
     // 定位共享内存中的数据
-    volatile uint8_t *data = (volatile uint8_t *)((uintptr_t)g_data_region + desc->offset);
+    volatile uint8_t *data = (volatile uint8_t *)((uintptr_t)g_data_regions[ch_idx] + desc->offset);
     
-    // [关键修复]：因为 seL4 对通道内存的映射带有 NORMAL Cache 属性，
-    // 而 Linux 是 Uncached 直接写 RAM，所以处理前必须强制失效 (Invalidate) 本地缓存，
-    // 否则 seL4 会取到 CPU 缓存中的垃圾旧数据！
     hyperamp_cache_invalidate((volatile void *)data, desc->length);
     
-    // 根据 service_id 处理
+    // 根据 service_id 处理 (保留原有的 switch 逻辑)
     switch (desc->service_id) {
         case SERVICE_ENCRYPT:
         case SERVICE_DECRYPT:
-            // 普通加解密 (无签名验证)
             for (size_t i = 0; i < desc->length; i++) {
                 data[i] ^= 0x5A;
             }
-            desc->status = 1; // Success
+            desc->status = 1;
             break;
             
         case SERVICE_VERIFY_ENCRYPT:
         case SERVICE_VERIFY_DECRYPT:
-            // 带签名验证的加解密
             printf("[seL4] Service %u: Verify + Process\n", desc->service_id);
             {
                 void *actual_payload = NULL;
                 size_t actual_len = 0;
-                
-                // 验证签名并获取实际 payload 位置
                 int result = verify_signed_data((void *)data, desc->length, 
                                                &actual_payload, &actual_len);
                 if (result != AUTH_OK) {
                     desc->status = result;
                     break;
                 }
-                
-                // 对 payload 执行 XOR 加密/解密
                 volatile uint8_t *payload_data = (volatile uint8_t *)actual_payload;
                 for (size_t i = 0; i < actual_len; i++) {
                     payload_data[i] ^= 0x5A;
                 }
-                
-                // 更新 descriptor: 只返回加密后的 payload (不含 SignedHeader)
-                // 计算 payload 相对于 data region 的偏移量
                 size_t header_size = sizeof(HyperampSignedHeader);
-                desc->offset = desc->offset + header_size;  // 跳过 SignedHeader
-                desc->length = (uint32_t)actual_len;        // 只返回 payload 长度
+                desc->offset = desc->offset + header_size;
+                desc->length = (uint32_t)actual_len;
                 desc->status = 1;
-                
-                printf("[seL4] ✓ Signed data processed: new offset=0x%x, new length=%u\n",
-                       desc->offset, desc->length);
             }
             break;
             
         case SERVICE_VERIFY_ONLY:
-            // 仅验证签名，不处理数据
-            printf("[seL4] Service 3: Verify Only\n");
             {
                 void *payload_out;
                 size_t payload_len;
@@ -624,49 +626,34 @@ static int process_bulk_message(void *payload_ptr, size_t len)
             break;
         
         case SERVICE_VALIDATE_ENCRYPT:
-            // 字段验证后加密 (先验证原始数据，再加密)
-            printf("[seL4] Service 7: Validate then Encrypt\n");
             {
-                // 先验证字段完整性
                 int result = validate_mission_data((const char *)data, desc->length);
                 if (result != VALIDATE_OK) {
                     desc->status = result;
                     break;
                 }
-                
-                // 验证通过，执行加密
                 for (size_t i = 0; i < desc->length; i++) {
                     data[i] ^= 0x5A;
                 }
                 desc->status = 1;
-                printf("[seL4] ✓ Mission data validated and encrypted successfully\n");
             }
             break;
             
         case SERVICE_VALIDATE_DECRYPT:
-            // 解密后验证字段 (先解密，再验证解密后的数据)
-            printf("[seL4] Service 8: Decrypt then Validate\n");
             {
-                // 先解密
                 for (size_t i = 0; i < desc->length; i++) {
                     data[i] ^= 0x5A;
                 }
-                
-                // 再验证解密后的数据
                 int result = validate_mission_data((const char *)data, desc->length);
                 if (result != VALIDATE_OK) {
-                    printf("[seL4] ✗ Decrypted data failed validation\n");
                     desc->status = result;
                     break;
                 }
-                
                 desc->status = 1;
-                printf("[seL4] ✓ Mission data decrypted and validated\n");
             }
             break;
             
         default:
-            printf("[seL4] Unknown bulk service %u, treating as encrypt\n", desc->service_id);
             for (size_t i = 0; i < desc->length; i++) {
                 data[i] ^= 0x5A;
             }
@@ -674,19 +661,16 @@ static int process_bulk_message(void *payload_ptr, size_t len)
             break;
     }
     
-    // [关键修复]: 数据处理完成（在 CPU 缓存中）后，必须强制刷回 (Clean) 到物理内存 RAM，
-    // 否则 Uncached 模式的 Linux 读取时，依然会读到物理内存上老旧的垃圾数据（图像下半部分由于没能写回 RAM 就成了噪点）。
     hyperamp_cache_clean((volatile void *)data, desc->length);
-    
-    return send_bulk_reply(desc);
+    return send_bulk_reply_idx(desc, ch_idx);
 }
+
 /**
- * @brief 发送回复消息到 Linux
+ * @brief 发送回复消息到 Linux (指定通道)
  */
-static int send_reply_to_linux(const char *reply_data, size_t reply_len, 
-                                uint16_t frontend_sess, uint16_t backend_sess)
+static int send_reply_to_linux_idx(const char *reply_data, size_t reply_len, 
+                                   uint16_t frontend_sess, uint16_t backend_sess, int ch_idx)
 {
-    // 构造消息头
     HyperampMsgHeader msg_hdr = {
         .version = 1,
         .proxy_msg_type = HYPERAMP_MSG_TYPE_DATA,
@@ -695,14 +679,12 @@ static int send_reply_to_linux(const char *reply_data, size_t reply_len,
         .payload_len = (uint16_t)reply_len,
     };
     
-    // 计算总大小
     size_t total_size = sizeof(HyperampMsgHeader) + reply_len;
-    if (total_size > g_rx_queue->block_size) {
+    if (total_size > g_tx_queues[ch_idx]->block_size) {
         printf("[seL4] Reply too large: %zu bytes\n", total_size);
         return HYPERAMP_ERROR;
     }
     
-    // 准备完整消息
     char msg_buf[4096];
     hyperamp_safe_memcpy(msg_buf, &msg_hdr, sizeof(HyperampMsgHeader));
     if (reply_len > 0) {
@@ -710,19 +692,68 @@ static int send_reply_to_linux(const char *reply_data, size_t reply_len,
                             reply_data, reply_len);
     }
     
-    // 入队到 TX Queue (seL4 → Linux)
-    // 重要：数据区使用独立的共享内存区域 (0xDE002000)
-    volatile void *tx_data_base = g_data_region;  // 共享数据区
-    
-    int ret = hyperamp_queue_enqueue(g_tx_queue, ZONE_ID_SEL4,
+    volatile void *tx_data_base = g_data_regions[ch_idx];
+    int ret = hyperamp_queue_enqueue(g_tx_queues[ch_idx], ZONE_ID_SEL4,
                                      msg_buf, total_size, tx_data_base);
     if (ret == HYPERAMP_OK) {
-        printf("[seL4] Message sent to Linux: %zu bytes\n", total_size);
+        printf("[seL4] Message sent to Linux (CH%d): %zu bytes\n", ch_idx, total_size);
     } else {
-        printf("[seL4] Failed to send message to Linux\n");
+        printf("[seL4] Failed to send message to Linux (CH%d)\n", ch_idx);
     }
-    
     return ret;
+}
+
+/**
+ * @brief 加密服务 (指定通道)
+ */
+static int service_encrypt_idx(volatile void *data_ptr, size_t length, 
+                               uint16_t frontend_sess, uint16_t backend_sess, int ch_idx)
+{
+    printf("[seL4] CH%d Encrypting %zu bytes\n", ch_idx, length);
+    uint8_t result_buf[HYPERAMP_MSG_MAX_SIZE];
+    size_t result_len = (length > HYPERAMP_MSG_MAX_SIZE) ? HYPERAMP_MSG_MAX_SIZE : length;
+    hyperamp_safe_memcpy(result_buf, data_ptr, result_len);
+    for (size_t i = 0; i < result_len; i++) {
+        result_buf[i] ^= 0x5A;
+    }
+    return send_reply_to_linux_idx((const char *)result_buf, result_len, frontend_sess, backend_sess, ch_idx);
+}
+
+/**
+ * @brief 解密服务 (指定通道)
+ */
+static int service_decrypt_idx(volatile void *data_ptr, size_t length,
+                               uint16_t frontend_sess, uint16_t backend_sess, int ch_idx)
+{
+    printf("[seL4] CH%d Decrypting %zu bytes\n", ch_idx, length);
+    uint8_t result_buf[HYPERAMP_MSG_MAX_SIZE];
+    size_t result_len = (length > HYPERAMP_MSG_MAX_SIZE) ? HYPERAMP_MSG_MAX_SIZE : length;
+    hyperamp_safe_memcpy(result_buf, data_ptr, result_len);
+    for (size_t i = 0; i < result_len; i++) {
+        result_buf[i] ^= 0x5A;
+    }
+    return send_reply_to_linux_idx((const char *)result_buf, result_len, frontend_sess, backend_sess, ch_idx);
+}
+
+/**
+ * @brief 处理单个消息 (指定通道)
+ */
+static int process_message_idx(volatile void *data_ptr, size_t length, uint16_t service_id,
+                               uint16_t frontend_sess, uint16_t backend_sess, int ch_idx)
+{
+    switch (service_id) {
+        case 0:  // Echo
+            return service_echo(data_ptr, length);
+        case 1:  // 加密
+            return service_encrypt_idx(data_ptr, length, frontend_sess, backend_sess, ch_idx);
+        case 2:  // 解密
+            return service_decrypt_idx(data_ptr, length, frontend_sess, backend_sess, ch_idx);
+        case 10: case 11: case 12: case 13:
+            return service_proxy_message(data_ptr, length, service_id - 10);
+        default:
+            printf("[seL4] CH%d Unknown service %u\n", ch_idx, service_id);
+            return service_echo(data_ptr, length);
+    }
 }
 
 
@@ -735,223 +766,112 @@ void hyperamp_server_main_loop(void)
 {
     printf("\n[seL4] ========================================\n");
     printf("[seL4] HyperAMP Frontend (seL4 Side) Starting...\n");
+    printf("[seL4] Multi-Channel Mode: CH0, CH1, CH2\n");
     printf("[seL4] ========================================\n");
-    printf("[seL4] Architecture:\n");
-    printf("[seL4]   - seL4: Frontend Protocol Stack (生成请求，处理响应)\n");
-    printf("[seL4]   - Linux: Backend Protocol Stack (转发到网络)\n");
-    printf("[seL4] TX Queue (seL4->Linux): %p\n", (void *)g_tx_queue);
-    printf("[seL4] RX Queue (Linux->seL4): %p\n", (void *)g_rx_queue);
-    printf("[seL4] Data Region: %p\n", (void *)g_data_region);
-    printf("[seL4] Zone ID: %d\n", ZONE_ID_SEL4);
     
-    // seL4 自己初始化队列（对等通信架构）
-    printf("[seL4] Initializing queues (seL4 as creator)...\n");
-    
-    // 配置 TX Queue (seL4 → Linux, seL4 写请求)
-    HyperampQueueConfig tx_config = {
-        .map_mode = HYPERAMP_MAP_MODE_CONTIGUOUS_BOTH,
-        .capacity = 256,
-        .block_size = 4096,
-        .phy_addr = SHM_TX_QUEUE_PADDR,
-        .virt_addr = (uint64_t)g_tx_queue,
-    };
-    
-    // 配置 RX Queue (Linux → seL4, seL4 读响应)
-    HyperampQueueConfig rx_config = {
-        .map_mode = HYPERAMP_MAP_MODE_CONTIGUOUS_BOTH,
-        .capacity = 256,
-        .block_size = 4096,
-        .phy_addr = SHM_RX_QUEUE_PADDR,
-        .virt_addr = (uint64_t)g_rx_queue,
-    };
-    
-    // 初始化 TX Queue (is_creator=1, seL4 作为创建者)
-    printf("[seL4] About to initialize TX Queue at address %p\n", (void *)g_tx_queue);
-    printf("[seL4] TX Queue should map to physical address: 0x%lx\n", SHM_TX_QUEUE_PADDR);
-    
-    // 在初始化之前读取内存内容
-    printf("[seL4] TX Queue BEFORE init (first 16 bytes): ");
-    volatile uint8_t *tx_bytes_before = (volatile uint8_t *)g_tx_queue;
-    for (int i = 0; i < 16; i++) {
-        printf("%02x ", tx_bytes_before[i]);
+    // 初始化所有 3 个通道的队列
+    for (int i = 0; i < 3; i++) {
+        printf("[seL4] Initializing CH%d queues...\n", i);
+
+        HyperampQueueConfig tx_config = {
+            .map_mode = HYPERAMP_MAP_MODE_CONTIGUOUS_BOTH,
+            .capacity = 256,
+            .block_size = 4096,
+            .phy_addr = g_shm_paddrs[i],
+            .virt_addr = (uint64_t)g_tx_queues[i],
+        };
+
+        HyperampQueueConfig rx_config = {
+            .map_mode = HYPERAMP_MAP_MODE_CONTIGUOUS_BOTH,
+            .capacity = 256,
+            .block_size = 4096,
+            .phy_addr = g_shm_paddrs[i] + SHM_RX_QUEUE_SIZE,
+            .virt_addr = (uint64_t)g_rx_queues[i],
+        };
+
+        if (hyperamp_queue_init(g_tx_queues[i], &tx_config, 1) != HYPERAMP_OK) {
+            printf("[seL4] ERROR: Failed to initialize CH%d TX queue!\n", i);
+            return;
+        }
+        if (hyperamp_queue_init(g_rx_queues[i], &rx_config, 1) != HYPERAMP_OK) {
+            printf("[seL4] ERROR: Failed to initialize CH%d RX queue!\n", i);
+            return;
+        }
+        
+        hyperamp_cache_invalidate((volatile void *)g_tx_queues[i], 64);
+        hyperamp_cache_invalidate((volatile void *)g_rx_queues[i], 64);
+        printf("[seL4] CH%d queues ready\n", i);
     }
-    printf("\n");
     
-    if (hyperamp_queue_init(g_tx_queue, &tx_config, 1) != HYPERAMP_OK) {
-        printf("[seL4] ERROR: Failed to initialize TX queue!\n");
-        return;
-    }
-    printf("[seL4] TX Queue initialized\n");
-    
-    /* 关键：失效缓存，确保打印的是从物理内存读取的最新数据 */
-    hyperamp_cache_invalidate((volatile void *)g_tx_queue, 64);
-    
-    // 在初始化之后读取内存内容
-    printf("[seL4] TX Queue AFTER init (first 16 bytes): ");
-    volatile uint8_t *tx_bytes_after = (volatile uint8_t *)g_tx_queue;
-    for (int i = 0; i < 16; i++) {
-        printf("%02x ", tx_bytes_after[i]);
-    }
-    printf("\n");
-    
-    // 初始化 RX Queue
-    printf("[seL4] About to initialize RX Queue at address %p\n", (void *)g_rx_queue);
-    
-    printf("[seL4] RX Queue BEFORE init (first 16 bytes): ");
-    volatile uint8_t *rx_bytes_before = (volatile uint8_t *)g_rx_queue;
-    for (int i = 0; i < 16; i++) {
-        printf("%02x ", rx_bytes_before[i]);
-    }
-    printf("\n");
-    
-    if (hyperamp_queue_init(g_rx_queue, &rx_config, 1) != HYPERAMP_OK) {
-        printf("[seL4] ERROR: Failed to initialize RX queue!\n");
-        return;
-    }
-    printf("[seL4] RX Queue initialized\n");
-    
-    /* 关键：失效缓存，确保打印的是从物理内存读取的最新数据 */
-    hyperamp_cache_invalidate((volatile void *)g_rx_queue, 64);
-    
-    printf("[seL4] RX Queue AFTER init (first 16 bytes): ");
-    volatile uint8_t *rx_bytes_after = (volatile uint8_t *)g_rx_queue;
-    for (int i = 0; i < 16; i++) {
-        printf("%02x ", rx_bytes_after[i]);
-    }
-    printf("\n");
-    
-    printf("[seL4] Both queues ready for communication\n");
-    
-    printf("[seL4] About to read queue metadata...\n");
-    printf("[seL4] TX Queue address: %p\n", (void *)g_tx_queue);
-    printf("[seL4] RX Queue address: %p\n", (void *)g_rx_queue);
-    printf("[seL4] capacity offset: %zu\n", offsetof(HyperampShmQueue, capacity));
-    printf("[seL4] Reading TX capacity at address: %p\n", 
-           (void *)((uintptr_t)g_tx_queue + offsetof(HyperampShmQueue, capacity)));
-    
-    // 读取队列信息
-    uint16_t tx_capacity = hyperamp_safe_read_u16(g_tx_queue, 
-                                                   offsetof(HyperampShmQueue, capacity));
-    printf("[seL4] TX capacity read successful: %u\n", tx_capacity);
-    
-    uint16_t tx_block_size = hyperamp_safe_read_u16(g_tx_queue,
-                                                     offsetof(HyperampShmQueue, block_size));
-    printf("[seL4] TX block_size read successful: %u\n", tx_block_size);
-    
-    uint16_t rx_capacity = hyperamp_safe_read_u16(g_rx_queue,
-                                                   offsetof(HyperampShmQueue, capacity));
-    printf("[seL4] RX capacity read successful: %u\n", rx_capacity);
-    
-    uint16_t rx_block_size = hyperamp_safe_read_u16(g_rx_queue,
-                                                     offsetof(HyperampShmQueue, block_size));
-    printf("[seL4] RX block_size read successful: %u\n", rx_block_size);
-    
-    printf("[seL4] TX Queue: capacity=%u, block_size=%u\n", tx_capacity, tx_block_size);
-    printf("[seL4] RX Queue: capacity=%u, block_size=%u\n", rx_capacity, rx_block_size);
+    printf("[seL4] All channels ready for communication\n");
     printf("[seL4] ========================================\n");
     
     /* 根据测试模式选择不同的执行路径 */
     if (CURRENT_TEST_MODE == TEST_MODE_FRONTEND) {
-        printf("[seL4] Running in FRONTEND TEST MODE\n");
-        printf("[seL4] Will send requests and wait for responses\n\n");
-        
-        // 准备前端上下文
+        printf("[seL4] Running in FRONTEND TEST MODE (CH0)\n");
         FrontendProxyContext frontend_ctx;
-        frontend_proxy_init(&frontend_ctx, g_tx_queue, g_rx_queue);
-        
-        // 运行测试场景
-        printf("[seL4] Starting test scenario...\n\n");
+        frontend_proxy_init(&frontend_ctx, g_tx_queues[0], g_rx_queues[0]);
         frontend_run_test_scenario(&frontend_ctx);
-        
-        printf("\n[seL4] Test scenario completed!\n");
-        printf("[seL4] Check backend logs to verify message exchange\n");
-        
-        // 进入监听循环，继续接收可能的后续响应
-        printf("\n[seL4] Switching to listen mode for additional responses...\n");
-    } else {
-        printf("[seL4] Running in LISTEN MODE\n");
-        printf("[seL4] Waiting for responses from Backend...\n\n");
-        printf("[seL4] NOTE: In production, seL4 应用通过前端协议栈发送请求到 TX Queue\n");
-        printf("[seL4]       当前测试模式：监听 RX Queue，接收 Linux 后端的响应\n\n");
+        printf("\n[seL4] Switching to listen mode for all channels...\n");
     }
+    
+    printf("[seL4] Waiting for responses from Backend on all channels...\n\n");
     
     // 消息处理缓冲区
     char msg_buf[4096];
     size_t msg_len;
-    int i =0;
-    // 主循环：监听来自 Linux 后端的响应
+    uint32_t loop_count = 0;
+
+    // 主循环：轮询所有 3 个通道
     while (1) {
-        /* 关键：在读取队列状态前失效缓存，确保读取到 Linux 写入的最新数据 */
-        hyperamp_cache_invalidate(g_rx_queue, 64);
-        
-        // 检查 RX Queue 是否有来自 Linux 后端的响应
-        uint16_t rx_header = hyperamp_safe_read_u16(g_rx_queue,
-                                                     offsetof(HyperampShmQueue, header));
-        uint16_t rx_tail = hyperamp_safe_read_u16(g_rx_queue,
-                                                   offsetof(HyperampShmQueue, tail));
-        i++;
-        if(i%100000==0){
-            printf("[seL4] RX Queue: header=%u, tail=%u\n", rx_header, rx_tail);
-            printf("[seL4] RX Queue: %p\n", g_rx_queue);
-        }
-        if (rx_tail != rx_header) {
-            // 有响应消息,出队
-            // 重要：数据区使用独立的共享内存区域 (0xDE002000)
-            volatile void *rx_data_base = g_data_region;  // 共享数据区
-            printf("debug: rx_header=%u, rx_tail=%u, rx_data_base=%p,msg_len=%zu,msg_buf=%p\n", rx_header, rx_tail, rx_data_base, msg_len, msg_buf);
-            int ret = hyperamp_queue_dequeue(g_rx_queue, ZONE_ID_SEL4,
-                                            msg_buf, sizeof(msg_buf), &msg_len,
-                                            rx_data_base);
+        for (int ch = 0; ch < 3; ch++) {
+            /* 关键：失效缓存 */
+            hyperamp_cache_invalidate(g_rx_queues[ch], 64);
             
-            if (ret == HYPERAMP_OK && msg_len >= sizeof(HyperampMsgHeader)) {
-                g_message_count++;
+            uint16_t rx_header = hyperamp_safe_read_u16(g_rx_queues[ch],
+                                                         offsetof(HyperampShmQueue, header));
+            uint16_t rx_tail = hyperamp_safe_read_u16(g_rx_queues[ch],
+                                                       offsetof(HyperampShmQueue, tail));
+
+            if (rx_tail != rx_header) {
+                // 通道 ch 有消息
+                volatile void *rx_data_base = g_data_regions[ch];
+                int ret = hyperamp_queue_dequeue(g_rx_queues[ch], ZONE_ID_SEL4,
+                                                msg_buf, sizeof(msg_buf), &msg_len,
+                                                rx_data_base);
                 
-                HyperampMsgHeader *hdr = (HyperampMsgHeader *)msg_buf;
-                printf("\n[seL4] === Response #%d from Backend ===\n", g_message_count);
-                printf("[seL4] Version: %u, Type: %u\n", hdr->version, hdr->proxy_msg_type);
-                printf("[seL4] Sessions: %u/%u\n", hdr->frontend_sess_id, hdr->backend_sess_id);
-                printf("[seL4] Payload: %u bytes\n", hdr->payload_len);
-                
-                // 提取载荷数据
-                void *payload_ptr = msg_buf + sizeof(HyperampMsgHeader);
-                size_t payload_len = hdr->payload_len;
-                
-                // 根据消息类型处理响应
-                int result;
-                if (hdr->proxy_msg_type == HYPERAMP_MSG_TYPE_BULK) {
-                    printf("[seL4] Received Bulk Transfer Request\n");
-                    result = process_bulk_message(payload_ptr, payload_len);
-                } else {
-                    int service_id;
-                    if (hdr->proxy_msg_type == HYPERAMP_MSG_TYPE_SERVICE) {
-                        service_id = hdr->frontend_sess_id; // For Service Call, frontend_sess_id holds Service ID
-                        printf("[seL4] Service Call: ID %d\n", service_id);
+                if (ret == HYPERAMP_OK && msg_len >= sizeof(HyperampMsgHeader)) {
+                    g_message_count++;
+                    HyperampMsgHeader *hdr = (HyperampMsgHeader *)msg_buf;
+                    
+                    printf("\n[seL4] === Message #%d from Backend (CH%d) ===\n", g_message_count, ch);
+                    
+                    void *payload_ptr = msg_buf + sizeof(HyperampMsgHeader);
+                    size_t payload_len = hdr->payload_len;
+                    
+                    int result;
+                    if (hdr->proxy_msg_type == HYPERAMP_MSG_TYPE_BULK) {
+                        result = process_bulk_message_idx(payload_ptr, payload_len, ch);
                     } else {
-                        service_id = hdr->proxy_msg_type + 10;  // Mapping for original proxy types
+                        int service_id = (hdr->proxy_msg_type == HYPERAMP_MSG_TYPE_SERVICE) ? 
+                                          hdr->frontend_sess_id : (hdr->proxy_msg_type + 10);
+                        result = process_message_idx(payload_ptr, payload_len, service_id,
+                                                     hdr->frontend_sess_id, hdr->backend_sess_id, ch);
                     }
-    
-                    result = process_message(payload_ptr, payload_len, service_id,
-                                                 hdr->frontend_sess_id, hdr->backend_sess_id);
+                    
+                    if (result == HYPERAMP_OK) {
+                        printf("[seL4] ✓ CH%d Message processed successfully\n", ch);
+                    } else {
+                        g_error_count++;
+                        printf("[seL4] ✗ CH%d Failed to process message\n", ch);
+                    }
                 }
-                
-                if (result == HYPERAMP_OK) {
-                    printf("[seL4] ✓ Response processed successfully\n");
-                    // 真实场景：将响应交给 seL4 应用程序
-                } else {
-                    g_error_count++;
-                    printf("[seL4] ✗ Failed to process response\n");
-                }
-                
-                printf("[seL4] === Response processed ===\n\n");
-            } else {
-                g_error_count++;
-                printf("[seL4] Dequeue failed or invalid response\n");
             }
         }
         
-        // 简单延迟,避免过度占用 CPU
-        for (volatile int i = 0; i < 10000; i++);
-        
+        loop_count++;
+        // 简单延迟
+        for (volatile int i = 0; i < 5000; i++);
     }
 }
 
@@ -967,35 +887,49 @@ int main(void)
     printf("================================================\n\n");
 
     // 从 IPC buffer msg[] 字段读取共享内存虚拟地址
-    // boot.c 写入 msg[2..4], 因为 sel4runtime 的 seL4_DebugNameThread
-    // 会将 "rootserver" 写入 msg[0..1]
-    //**不要在seL4_GetMR() 之前插入任何 seL4 系统调用，否则地址会被覆盖掉！！！
-    g_tx_queue    = (volatile HyperampShmQueue *)seL4_GetMR(2);  // TX: seL4 → Linux
-    g_rx_queue    = (volatile HyperampShmQueue *)seL4_GetMR(3);  // RX: Linux → seL4
-    g_data_region = (volatile void *)            seL4_GetMR(4);  // Data Region: 4MB
+    // boot.c 写入 msg[2..4]
+    uintptr_t ch0_tx_vaddr = seL4_GetMR(2);
+    uintptr_t ch0_rx_vaddr = seL4_GetMR(3);
+    uintptr_t ch0_data_vaddr = seL4_GetMR(4);
 
-    printf("[seL4] Shared Memory Addresses (from IPC msg[2..4]):\n");
-    printf("  TX Queue (seL4->Linux): %p\n", (void *)g_tx_queue);
-    printf("  RX Queue (Linux->seL4): %p\n", (void *)g_rx_queue);
-    printf("  Data Region  :          %p\n", (void *)g_data_region);
-    
-    // 验证地址有效性
-    if (!g_tx_queue || !g_rx_queue || !g_data_region) {
+    // 初始化 CH0
+    g_tx_queues[0]    = (volatile HyperampShmQueue *)ch0_tx_vaddr;
+    g_rx_queues[0]    = (volatile HyperampShmQueue *)ch0_rx_vaddr;
+    g_data_regions[0] = (volatile void *)            ch0_data_vaddr;
+
+    // 根据固定偏移计算并初始化 CH1 和 CH2
+    // CH1 (Offset 2MB), CH2 (Offset 3MB)
+    g_tx_queues[1]    = (volatile HyperampShmQueue *)(ch0_tx_vaddr + CH1_OFFSET);
+    g_rx_queues[1]    = (volatile HyperampShmQueue *)(ch0_rx_vaddr + CH1_OFFSET);
+    g_data_regions[1] = (volatile void *)            (ch0_data_vaddr + CH1_OFFSET);
+
+    g_tx_queues[2]    = (volatile HyperampShmQueue *)(ch0_tx_vaddr + CH2_OFFSET);
+    g_rx_queues[2]    = (volatile HyperampShmQueue *)(ch0_rx_vaddr + CH2_OFFSET);
+    g_data_regions[2] = (volatile void *)            (ch0_data_vaddr + CH2_OFFSET);
+
+    printf("[seL4] Shared Memory Addresses for 3 Channels:\n");
+    for (int i = 0; i < 3; i++) {
+        printf("  CH%d: TX=%p, RX=%p, Data=%p\n", i, 
+               (void *)g_tx_queues[i], (void *)g_rx_queues[i], (void *)g_data_regions[i]);
+    }
+
+    // 验证 CH0 地址有效性 (基础检查)
+    if (!g_tx_queues[0] || !g_rx_queues[0] || !g_data_regions[0]) {
         printf("[seL4] ERROR: Invalid shared memory addresses!\n");
         return -1;
     }
-    
+
     // 检查结构体大小
     printf("[seL4] HyperampShmQueue size: %zu bytes\n", sizeof(HyperampShmQueue));
     printf("[seL4] HYPERAMP_MAX_MAP_TABLE_ENTRIES: %d\n", HYPERAMP_MAX_MAP_TABLE_ENTRIES);
     printf("[seL4] magic field offset: %zu bytes\n", offsetof(HyperampShmQueue, magic));
     printf("[seL4] WARNING: If offset > 4096, accessing magic will page fault!\n");
-    
+
     printf("[seL4] Shared memory initialized successfully\n\n");
-    
+
     // 启动消息处理循环
     hyperamp_server_main_loop();
-   
+
     // 永不返回
     return 0;
 }
