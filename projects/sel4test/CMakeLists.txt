@@ -29,13 +29,15 @@ endif()
 elfloader_import_project()
 
 # Allow choosing between different applications
-set(Sel4testApp "sel4test-driver" CACHE STRING "Application to build (sel4test-driver, hello-world, or hyperamp-server)")
-set_property(CACHE Sel4testApp PROPERTY STRINGS sel4test-driver hello-world hyperamp-server)
+set(Sel4testApp "sel4test-driver" CACHE STRING "Application to build (sel4test-driver, hello-world, hyperamp-server, or front)")
+set_property(CACHE Sel4testApp PROPERTY STRINGS sel4test-driver hello-world hyperamp-server front)
 
 if(Sel4testApp STREQUAL "hello-world")
     add_subdirectory(apps/hello-world)
 elseif(Sel4testApp STREQUAL "hyperamp-server")
     add_subdirectory(apps/hyperamp-server)
+elseif(Sel4testApp STREQUAL "front")
+    add_subdirectory(apps/front)
 else()
     add_subdirectory(apps/sel4test-driver)
 endif()
