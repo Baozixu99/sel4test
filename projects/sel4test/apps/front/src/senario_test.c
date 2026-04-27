@@ -570,7 +570,7 @@ int session_msg_inject_frontend_hyperamp(FrontendEngine *engine){
     char *desc_string;
     uint8_t               *res_buf[100] = {NULL};
     char                  desc_buf[100] = {0};
-    char *ip_port_string = "192.168.1.101:8888";
+    char *ip_port_string = "192.168.137.2:8888";
 
     sess_msg_hdr                            = &sess_create_msg_hdr;
 

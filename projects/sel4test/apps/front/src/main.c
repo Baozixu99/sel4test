@@ -92,7 +92,7 @@ int main(void){
 //    test_proxy_scenario_multi_type_msg_build_frontend_hyperamp(eng);
 #if 1
     sess    = frontend_sess_new(eng);
-    ret     = frontend_sess_connect_by_addrstr(sess, SESS_UDP_PROTO, "192.168.1.101:8888");
+    ret     = frontend_sess_connect_by_addrstr(sess, SESS_UDP_PROTO, "192.168.137.2:8888");
     frontend_sess_bind_callback(sess, test_session_event_callback);
 
     frontend_iot_sess_send(frontend_bluetooth_sess, "test bluetooth", strlen("test bluetooth"));
