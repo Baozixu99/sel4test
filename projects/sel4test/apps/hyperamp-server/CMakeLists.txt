@@ -30,18 +30,18 @@ set(HYPERAMP_SOURCES
     src/channel_ch1.c
 )
 
-# front 项目的源文件（通过 symlink 引入，排除 front 自身的 main.c）
+# front 项目的源文件（直接引用原始路径，排除 front 自身的 main.c）
 set(FRONT_SOURCES
-    src/front_common_utils.c
-    src/front_frontend_proto.c
-    src/front_session.c
-    src/front_session_pool.c
-    src/front_shared_mem_io.c
-    src/front_dev.c
-    src/front_engine.c
-    src/front_frontend_api.c
-    src/front_senario_test.c
-    src/front_hyperamp_shm_queue.c
+    ${FRONT_DIR}/src/common_utils.c
+    ${FRONT_DIR}/src/frontend_proto.c
+    ${FRONT_DIR}/src/session.c
+    ${FRONT_DIR}/src/session_pool.c
+    ${FRONT_DIR}/src/shared_mem_io.c
+    ${FRONT_DIR}/src/dev.c
+    ${FRONT_DIR}/src/engine.c
+    ${FRONT_DIR}/src/frontend_api.c
+    ${FRONT_DIR}/src/senario_test.c
+    ${FRONT_DIR}/src/hyperamp_shm_queue.c
 )
 
 add_executable(hyperamp-server EXCLUDE_FROM_ALL

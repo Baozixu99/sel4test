@@ -1,1 +1,0 @@
-../../front/src/session_pool.c
