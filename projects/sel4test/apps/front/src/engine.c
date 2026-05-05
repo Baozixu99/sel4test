@@ -8,6 +8,12 @@ volatile HyperampShmQueue *g_hyper_tx_queue = NULL;  // seL4 → Linux (seL4 wri
 volatile HyperampShmQueue *g_hyper_rx_queue = NULL;  // Linux → seL4 (seL4 reads responses, Linux writes)
 volatile void *g_hyper_data_region          = NULL;  // Shared data buffer referenced by entries in TX/RX queues
 
+/* Multi-channel layout: CH0 base + 0x200000 = CH1 base, +0x300000 = CH2 base */
+#define HYPERAMP_CH1_OFFSET_PADDR   0x200000UL
+#define HYPERAMP_CH0_QUEUE_CAP      256
+/* CH1 total is 1MB; data_region = 1MB - 8KB = 254 blocks; enqueue uses (idx+1)*block_size => cap <= 253 */
+#define HYPERAMP_CH1_QUEUE_CAP      253
+
 #if 0
 HyperampQueueConfig hyper_tx_config = {
         .map_mode = HYPERAMP_MAP_MODE_CONTIGUOUS_BOTH,
@@ -614,20 +620,58 @@ int engine_init_hyperamp_queue(FrontendEngine *eng){
         return FRONTEND_PROXY_PROCESS_ERROR;
     }
 
-    // g_hyper_tx_queue    = SHM_TX_QUEUE_VADDR;
-    // g_hyper_rx_queue    = SHM_RX_QUEUE_VADDR;
-    // g_hyper_data_region = SHM_DATA_REGION_VA;
-    // 从 IPC buffer msg[] 字段读取共享内存虚拟地址
-    // boot.c 写入 msg[2..4], 因为 sel4runtime 的 seL4_DebugNameThread
-    // 会将 "rootserver" 写入 msg[0..1]
-    //**不要在seL4_GetMR() 之前插入任何 seL4 系统调用，否则地址会被覆盖掉！！！
-    g_hyper_tx_queue    = (volatile HyperampShmQueue *)seL4_GetMR(2);  // TX: seL4 → Linux
-    g_hyper_rx_queue    = (volatile HyperampShmQueue *)seL4_GetMR(3);  // RX: Linux → seL4
-    g_hyper_data_region = (volatile void *)            seL4_GetMR(4);  // Data Region: 4MB
-    printf("[seL4] Shared Memory Addresses (from IPC msg[2..4]):\n");
+    /*
+     * Read shared memory virtual addresses from the IPC buffer msg[] fields.
+     * Kernel boot publishes:
+     *   - CH0 in msg[2..4]
+     *   - CH1 in msg[5..7]
+     * NOTE: Do NOT issue any seL4 syscalls before reading these values.
+     */
+    seL4_Word ch1_tx = seL4_GetMR(5);
+    seL4_Word ch1_rx = seL4_GetMR(6);
+    seL4_Word ch1_dt = seL4_GetMR(7);
+    seL4_Word ch0_tx = seL4_GetMR(2);
+    seL4_Word ch0_rx = seL4_GetMR(3);
+    seL4_Word ch0_dt = seL4_GetMR(4);
+
+    uint64_t phy_offset = 0;
+    uint16_t queue_capacity = HYPERAMP_CH0_QUEUE_CAP;
+    if (ch1_tx && ch1_rx && ch1_dt) {
+        /* Default: use CH1 for network proxy */
+        g_hyper_tx_queue    = (volatile HyperampShmQueue *)ch1_tx;  // TX: seL4 → Linux
+        g_hyper_rx_queue    = (volatile HyperampShmQueue *)ch1_rx;  // RX: Linux → seL4
+        g_hyper_data_region = (volatile void *)            ch1_dt;  // CH1 Data
+        phy_offset = HYPERAMP_CH1_OFFSET_PADDR;
+        queue_capacity = HYPERAMP_CH1_QUEUE_CAP;
+
+        printf("[seL4] Shared Memory Addresses (CH1, from IPC msg[5..7]):\n");
+    } else {
+        /* Fallback: legacy CH0 layout */
+        g_hyper_tx_queue    = (volatile HyperampShmQueue *)ch0_tx;
+        g_hyper_rx_queue    = (volatile HyperampShmQueue *)ch0_rx;
+        g_hyper_data_region = (volatile void *)            ch0_dt;
+        phy_offset = 0;
+        queue_capacity = HYPERAMP_CH0_QUEUE_CAP;
+
+        printf("[seL4] Shared Memory Addresses (CH0 fallback, from IPC msg[2..4]):\n");
+    }
+
     printf("  TX Queue (seL4->Linux): %p\n", (void *)g_hyper_tx_queue);
     printf("  RX Queue (Linux->seL4): %p\n", (void *)g_hyper_rx_queue);
     printf("  Data Region  :          %p\n", (void *)g_hyper_data_region);
+
+    /* Update queue init configs to match the selected channel */
+    hyperamp_tx_config.map_mode   = HYPERAMP_MAP_MODE_CONTIGUOUS_BOTH;
+    hyperamp_tx_config.capacity   = queue_capacity;
+    hyperamp_tx_config.block_size = 4096;
+    hyperamp_tx_config.phy_addr   = (uint64_t)SHM_TX_QUEUE_PADDR + phy_offset;
+    hyperamp_tx_config.virt_addr  = (uint64_t)g_hyper_tx_queue;
+
+    hyperamp_rx_config.map_mode   = HYPERAMP_MAP_MODE_CONTIGUOUS_BOTH;
+    hyperamp_rx_config.capacity   = queue_capacity;
+    hyperamp_rx_config.block_size = 4096;
+    hyperamp_rx_config.phy_addr   = (uint64_t)SHM_RX_QUEUE_PADDR + phy_offset;
+    hyperamp_rx_config.virt_addr  = (uint64_t)g_hyper_rx_queue;
 
     ret = hyperamp_queue_init(g_hyper_tx_queue, &hyperamp_tx_config, 1);
 

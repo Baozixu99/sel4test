@@ -18,7 +18,7 @@
 
 #define HYPERAMP_OK                     0
 #define HYPERAMP_ERROR                  (-1)
-#define HYPERAMP_AGAIN                  (-2)
+#define HYPERAMP_AGAIN                  1
 
 /* 内存映射模式 */
 typedef enum {
