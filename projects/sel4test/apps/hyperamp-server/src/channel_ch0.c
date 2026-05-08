@@ -14,6 +14,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "channel_ch0.h"
+#include "channel_ch1.h"
 #include "ch0_utils.h"
 
 /* CH0 数据区大小：2MB 通道 - 8KB 队列 */
@@ -101,6 +102,63 @@ static int ch0_send_bulk_reply(ChannelContext *ctx, HyperampBulkDescriptor *desc
                             sizeof(HyperampMsgHeader) + sizeof(HyperampBulkDescriptor));
 }
 
+/* ==================== CH0→CH1 跨通道转发 ==================== */
+
+/**
+ * @brief 将 CH0 处理结果转发到 CH1 网络代理
+ *
+ * 如果 CH1 Session 已就绪，将数据通过网络代理分发。
+ * 转发失败不影响 CH0 正常应答流程（graceful fallback）。
+ */
+static int ch0_try_forward_to_ch1(const uint8_t *data, size_t len)
+{
+    if (!ch1_is_ready()) {
+        printf("[CH0→CH1] CH1 未就绪，跳过网络分发\n");
+        return HYPERAMP_ERROR;
+    }
+    return ch1_forward_data(data, len);
+}
+
+/**
+ * @brief 将 Bulk 共享内存中的处理结果分块转发到 CH1
+ *
+ * 由于共享内存数据可能很大（图片），采用分块读取+转发，
+ * 避免在栈上分配过大的缓冲区。
+ */
+static int ch0_try_forward_bulk_to_ch1(ChannelContext *ctx,
+                                        uint32_t offset, uint32_t length)
+{
+    if (!ch1_is_ready()) {
+        printf("[CH0→CH1] CH1 未就绪，跳过 Bulk 数据网络分发\n");
+        return HYPERAMP_ERROR;
+    }
+
+    volatile uint8_t *src = (volatile uint8_t *)((uintptr_t)ctx->data_region + offset);
+
+    /* 分块转发，每块 4096 bytes */
+    #define FORWARD_CHUNK_SIZE 4096
+    uint8_t chunk_buf[FORWARD_CHUNK_SIZE];
+    uint32_t remaining = length;
+    uint32_t pos = 0;
+
+    while (remaining > 0) {
+        uint32_t chunk = (remaining > FORWARD_CHUNK_SIZE) ? FORWARD_CHUNK_SIZE : remaining;
+        hyperamp_safe_memcpy(chunk_buf, (void *)(src + pos), chunk);
+
+        int ret = ch1_forward_data(chunk_buf, chunk);
+        if (ret != HYPERAMP_OK) {
+            printf("[CH0→CH1] Bulk 分块转发中断，已发送 %u/%u bytes\n", pos, length);
+            return HYPERAMP_ERROR;
+        }
+
+        pos += chunk;
+        remaining -= chunk;
+    }
+
+    printf("[CH0→CH1] ✓ Bulk 数据网络分发完成 (%u bytes)\n", length);
+    return HYPERAMP_OK;
+}
+
 /* ==================== 服务处理函数 ==================== */
 
 static int ch0_service_echo(volatile void *data_ptr, size_t length)
@@ -124,6 +182,10 @@ static int ch0_service_encrypt(ChannelContext *ctx, volatile void *data_ptr, siz
         result_buf[i] ^= 0x5A;
     }
 
+    /* 尝试通过 CH1 网络代理分发加密结果 */
+    ch0_try_forward_to_ch1(result_buf, result_len);
+
+    /* CH0 仍然返回应答（处理完成确认） */
     int ret = ch0_send_reply(ctx, (const char *)result_buf, result_len,
                               frontend_sess, backend_sess);
     printf("[CH0] %s 加密数据已发送\n", (ret == HYPERAMP_OK) ? "✓" : "✗");
@@ -144,6 +206,10 @@ static int ch0_service_decrypt(ChannelContext *ctx, volatile void *data_ptr, siz
         result_buf[i] ^= 0x5A;
     }
 
+    /* 尝试通过 CH1 网络代理分发解密结果 */
+    ch0_try_forward_to_ch1(result_buf, result_len);
+
+    /* CH0 仍然返回应答 */
     int ret = ch0_send_reply(ctx, (const char *)result_buf, result_len,
                               frontend_sess, backend_sess);
     printf("[CH0] %s 解密数据已发送\n", (ret == HYPERAMP_OK) ? "✓" : "✗");
@@ -326,6 +392,22 @@ static int ch0_process_bulk(ChannelContext *ctx, void *payload_ptr, size_t len)
 
     /* 写后 clean：确保处理后的数据刷回物理内存供 Linux 读取 */
     hyperamp_cache_clean((volatile void *)data, desc->length);
+
+    /*
+     * 跨通道分发：将安全处理后的 Bulk 数据通过 CH1 网络代理转发。
+     * 仅对加密类服务进行转发（解密/验签结果通常仅需返回给请求方）。
+     */
+    if (desc->status == 1) {
+        switch (desc->service_id) {
+            case SERVICE_ENCRYPT:
+            case SERVICE_VERIFY_ENCRYPT:
+            case SERVICE_VALIDATE_ENCRYPT:
+                ch0_try_forward_bulk_to_ch1(ctx, desc->offset, desc->length);
+                break;
+            default:
+                break;
+        }
+    }
 
     return ch0_send_bulk_reply(ctx, desc);
 }

@@ -31,4 +31,23 @@ int ch1_init(ChannelContext *ctx);
  */
 int ch1_process_message(ChannelContext *ctx);
 
+/**
+ * @brief 检查 CH1 网络代理 Session 是否已就绪（已连接）
+ *
+ * @return 1=已就绪可发送, 0=未就绪
+ */
+int ch1_is_ready(void);
+
+/**
+ * @brief 通过 CH1 网络代理转发数据（供 CH0 跨通道调用）
+ *
+ * 将 CH0 安全处理后的结果通过 CH1 的网络代理 Session 发送，
+ * 最终由 Linux 侧 HighSpeedCProxy 接收并通过真实网络对外转发。
+ *
+ * @param data 待转发的数据
+ * @param len  数据长度
+ * @return HYPERAMP_OK=成功, HYPERAMP_ERROR=失败（Session 未就绪等）
+ */
+int ch1_forward_data(const uint8_t *data, size_t len);
+
 #endif /* CHANNEL_CH1_H */

@@ -31,6 +31,38 @@ extern volatile HyperampShmQueue *g_hyper_tx_queue;
 extern volatile HyperampShmQueue *g_hyper_rx_queue;
 extern volatile void *g_hyper_data_region;
 
+/* CH1 活跃 Session 句柄（供跨通道转发使用） */
+static struct FrontendSession *g_ch1_active_session = NULL;
+
+/**
+ * @brief CH1 专用的 Session 事件回调
+ *
+ * 替换 default_session_event_callback，后者在 CONN 事件时
+ * 会自动发送 "test msg"，可能因目标无监听而触发 ICMP 错误，
+ * 导致后端关闭 Session。此回调仅记录日志，不主动发送数据。
+ */
+static void ch1_session_event_callback(struct FrontendSession *sess,
+                                        FrontendSessionEvent event)
+{
+    switch (event) {
+        case FRONTEND_SESS_EVENT_CONN:
+            printf("[CH1] Session 已连接，跨通道转发就绪\n");
+            break;
+        case FRONTEND_SESS_EVENT_RECVDATA:
+            printf("[CH1] 收到后端数据\n");
+            break;
+        case FRONTEND_SESS_EVENT_CLOSE:
+            printf("[CH1] Session 已关闭\n");
+            g_ch1_active_session = NULL;
+            break;
+        case FRONTEND_SESS_EVENT_ABNORMAL:
+            printf("[CH1] Session 异常\n");
+            break;
+        default:
+            break;
+    }
+}
+
 /* ==================== CH1 初始化 ==================== */
 
 int ch1_init(ChannelContext *ctx)
@@ -104,14 +136,27 @@ int ch1_init(ChannelContext *ctx)
     printf("[CH1] 网络代理子系统初始化完成\n");
 
     /* 
-     * 恢复原 front/src/main.c 中的测试通信逻辑：
-     * 主动发起一个网络代理会话，这样 Linux 侧就不会一直处于 queue empty 状态。
+     * 建立网络代理 Session，用于：
+     * 1. CH0 安全处理后结果的跨通道分发
+     * 2. 验证前后端通信链路
      */
-    printf("[CH1] 正在建立测试网络代理 Session...\n");
+    printf("[CH1] 正在建立网络代理 Session...\n");
     struct FrontendSession *sess = frontend_sess_new(p_g_fr_eng);
     if (sess) {
+        /*
+         * 绑定自定义回调，替换默认的 default_session_event_callback。
+         * 默认回调在 CONN 事件时会自动发送 "test msg"，如果目标端口
+         * 没有监听程序，会触发 ICMP Port Unreachable → epoll error →
+         * 后端关闭 Session → 后续跨通道转发的数据无法送达。
+         */
+        frontend_sess_bind_callback(sess, ch1_session_event_callback);
+
         ret = frontend_sess_connect_by_addrstr(sess, SESS_UDP_PROTO, "192.168.137.2:8888");
-        printf("[CH1] 测试 Session 连接建立请求发送 (ret=%d)\n", ret);
+        printf("[CH1] Session 连接请求已发送 (ret=%d)\n", ret);
+        /* 保存 Session 句柄，供 CH0 跨通道转发使用 */
+        g_ch1_active_session = sess;
+    } else {
+        printf("[CH1] 警告：Session 创建失败，跨通道转发将不可用\n");
     }
 
     return HYPERAMP_OK;
@@ -133,4 +178,36 @@ int ch1_process_message(ChannelContext *ctx)
     frontend_engine_run_hyperamp_once();
 
     return HYPERAMP_OK;
+}
+
+/* ==================== CH1 跨通道转发接口 ==================== */
+
+int ch1_is_ready(void)
+{
+    if (!g_ch1_active_session) return 0;
+    /* Session 状态 FRONTEND_SESS_CONNECTED = 2 */
+    return (g_ch1_active_session->sess_state == FRONTEND_SESS_CONNECTED) ? 1 : 0;
+}
+
+int ch1_forward_data(const uint8_t *data, size_t len)
+{
+    if (!g_ch1_active_session) {
+        printf("[CH0→CH1] 转发失败：Session 未建立\n");
+        return HYPERAMP_ERROR;
+    }
+
+    if (g_ch1_active_session->sess_state != FRONTEND_SESS_CONNECTED) {
+        printf("[CH0→CH1] 转发失败：Session 未就绪 (state=%d)\n",
+               g_ch1_active_session->sess_state);
+        return HYPERAMP_ERROR;
+    }
+
+    int ret = frontend_sess_send(g_ch1_active_session, (uint8_t *)data, (uint32_t)len);
+    if (ret >= 0) {
+        printf("[CH0→CH1] ✓ 安全处理结果已提交网络代理分发 (%zu bytes)\n", len);
+        return HYPERAMP_OK;
+    }
+
+    printf("[CH0→CH1] ✗ 网络代理分发失败 (ret=%d)\n", ret);
+    return HYPERAMP_ERROR;
 }

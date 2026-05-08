@@ -365,3 +365,40 @@ seL4 用户态中部分旧类型（如内核态遗留的 `word_t`）已不可用
 - **框架剥离**：移除了原 `front/src/main.c` 中硬编码的测试会话创建代码后，CH1 通道在初始化完成后会处于纯净的静默监听状态。
 - **正常现象**：此时 Linux 侧 `cproxy` 不停打印 `HyperAMP RX queue is empty!` 是正常的无阻塞轮询表现。
 - **如何发包**：必须由 seL4 端业务层（或网络层协议栈回调）主动发起 Session 建连，或接入真实虚拟网卡收发流程，CH1 才会有数据流通。我们在验证阶段通过在 `ch1_init` 补充测试 `frontend_sess_new` 代码，成功验证了前/后端 UDP 会话建立和数据转发的全链路。
+
+### 13.5 CH0 → CH1 跨通道桥接（安全处理-可信分发）
+
+为使 seL4 从被动的"安全协处理器"演进为主动的"可信数据分发节点"，我们实现了 CH0 → CH1 的跨通道桥接。数据流如下：
+
+```
+Linux (hvisor-tool) ──CH0──> seL4 (加解密/验签)
+                                   │ 处理完成
+                                   ├── CH1 ──> Linux (cproxy) ──> 外部网络   [网络分发]
+                                   └── CH0 ──> Linux (hvisor-tool)            [处理确认]
+```
+
+关键设计点：
+- **选择性转发**：仅加密类服务（`SERVICE_ENCRYPT`、`SERVICE_VERIFY_ENCRYPT`、`SERVICE_VALIDATE_ENCRYPT`）的处理结果会通过 CH1 分发。解密和纯验签结果仅通过 CH0 返回给请求方。
+- **优雅降级**：CH1 Session 未就绪时，跳过网络分发，CH0 应答不受影响。
+- **大数据分块**：Bulk 共享内存数据按 4KB 分块读取并转发，避免栈溢出。
+- **零额外基础设施**：由于 CH0/CH1 在同一进程中，跨通道调用仅是函数调用，无需 IPC。
+
+### 13.6 稳定性优化与最终验证
+
+在集成测试过程中，我们针对 Session 稳定性进行了关键优化，并完成了全链路验证：
+
+#### 13.6.1 Session 异常断连修复
+- **问题**：原 `default_session_event_callback` 在连接建立后会立即发送 "test msg"。若此时目标 IP/Port 尚未开启监听，Linux 后端会触发 `ICMP Port Unreachable` 错误。cproxy 的 epoll 捕获该错误后会主动关闭 Session，导致后续真正的跨通道分发数据丢失。
+- **优化**：在 `channel_ch1.c` 中实现了自定义的 `ch1_session_event_callback`，连接建立时仅记录状态而不主动发包，彻底解决了由于"竞态"导致的 Session 闪断问题。
+
+#### 13.6.2 全链路验证成功
+通过以下拓扑和步骤完成了全链路验证：
+1. **拓扑**：`hvisor-tool (Linux)` -> `CH0 (seL4)` -> `CH1 (seL4)` -> `cproxy (Linux)` -> `nc (Linux Network)`。
+2. **结果**：
+   - seL4 成功接收 CH0 的加密请求。
+   - 加密后的二进制数据同步通过 CH1 分发。
+   - Linux 侧通过 `ip netns exec ns1 nc -u -l -p 8888 > forwarded_data.txt &` 成功接收到了经过 seL4 安全处理的原始二进制数据包。
+   - CH0 返回路径保持正常，Linux 端成功保存了加密文件。
+
+这标志着 **"安全处理 + 可信分发"** 的多通道闭环架构正式落地。
+
