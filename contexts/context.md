@@ -1,33 +1,35 @@
-# HyperAMP 多通道跨虚拟机通信系统 — 工程上下文
+# HyperAMP 多通道跨虚拟机通信系统 — 工程上下文 (Agent Handoff Prompt)
 
-## 角色定义
-
-你正在参与一个基于 hvisor（Type-1 Hypervisor）+ seL4 + Linux + HyperAMP 共享内存通信构建的跨虚拟机高性能通信系统。
-
-你的职责不是重新设计架构，而是在理解现有系统的基础上继续实现与扩展。
-
-**你必须严格保持：**
-- 现有共享内存布局和物理地址分配
-- HyperampShmQueue 数据结构和 spinlock 语义
-- creator / connector 初始化角色约定
-- polling 通信模式（不使用中断）
-- cache invalidate / clean 一致性逻辑
-- 多通道协议隔离（CH0 和 CH1 消息域不混用）
-
-**你不要随意：**
-- 重构通信协议或消息格式
-- 修改共享内存物理地址布局
-- 引入新的 IPC 模型（信号量、事件通知等）
-- 将 polling 改为 interrupt
-- 删除任何 cache maintenance 代码
+> **致接手的大模型 / Agent：**
+> 欢迎来到 HyperAMP 系统。这是一个运行中的、跨越 Type-1 Hypervisor (hvisor) + seL4 + Linux 的真实工程系统。
+> 本文档是该系统的**核心工程沉淀**。你看到的诸多设计（如双通道隔离、轮询模式、Cache 手动维护）均为无数次踩坑与权衡后的最优解。
+> **最高指令：不要将系统理想化重构为“教科书架构”。你的首要任务是在现有工程约束下解决问题并扩展功能。**
 
 ---
 
-## 1. 系统整体架构
+## 一、系统操作铁律 (Agent Directives)
 
-系统由四个核心项目组成，协同实现跨虚拟机安全通信：
+### 🔴 绝对禁止 (Never Do)
+1. **不要打破多通道协议隔离**：CH0 (`channel_ch0.c`) 只处理加解密、验签及 Bulk 数据处理；CH1 (`channel_ch1.c`) 只负责网络代理代理栈封装；CH2 为预留通道，专用于远程内存访问 (Remote Memory Access)。各通道消息域绝不可混用，跨通道流转必须通过明确的接口桥接。
+2. **不要擅自修改共享内存物理地址布局**：底层 Hypervisor 强绑定了特定的 PA (Physical Address)，任何偏移量或边界的修改会导致立刻崩溃。
+3. **不要引入基于中断 (Interrupt) 或信号量 (Semaphore) 的 IPC 模型**：目前极简的并发 Polling（轮询）模式比中断更稳定，且避免了复杂的虚实中断路由问题。
+4. **不要删除或合并 Cache 维护逻辑**：所有的 `hyperamp_cache_invalidate` 与 `hyperamp_cache_clean` 都是跨 VM 数据一致性的生命线。
+5. **严禁混淆 Creator 与 Connector**：同一个 Channel 有且只能有一个 Creator 负责格式化队列（目前全是 seL4 充当 Creator）。
 
-```
+### 🟢 必须遵守 (Always Do)
+1. **尊重定长块 (Fixed Block Size)**：`HyperampShmQueue` 的 `block_size` 严格绑定为 4096 字节。超长数据必须进行 Bulk 分块逻辑处理。
+2. **遵守 seL4 的类型约定**：seL4 用户态必须使用 `seL4_Word`（而非内核态的 `word_t`），且 IPC 寄存器读取必须优先调用 `seL4_GetMR()`。
+3. **保持包含路径的优先级**：CMakeLists 中 `front/include` 永远优先于 `hyperamp-server/include`，以确保全局使用新版的 `hyperamp_shm_queue.h`。
+
+---
+
+## 二、架构演化与系统现状
+
+本系统从**单通道雏形**演化为如今的**多通道分离 + 跨通道桥接**架构。
+**演化原因**：早期数据面与控制面耦合，导致加解密请求与网络代理握手产生时序冲突。分离 CH0 和 CH1 彻底解耦了内部可信处理与外部网络分发。
+
+### 系统组件全景图
+```text
 ┌─────────────────────────────────────────────────────┐
 │                   hvisor (EL2)                      │
 │         Type-1 Hypervisor / VM 管理 / IVC           │
@@ -36,319 +38,95 @@
 │                       │                             │
 │  hvisor-tool          │  hyperamp-server            │
 │  (CH0 connector)      │  (统一 rootserver)          │
-│       ↕ CH0           │    ├── channel_ch0 (加解密) │
-│                       │    ├── channel_ch1 (网络代理)│
-│  HighSpeedCProxy      │    └── main.c (双通道轮询)  │
-│  (CH1 connector)      │                             │
-│       ↕ CH1           │                             │
+│       ↕ CH0           │    ├── channel_ch0 (处理)   │
+│                       │    ├── channel_ch1 (网代)   │
+│  HighSpeedCProxy      │    ├── channel_ch2 (远存)   │
+│  (CH1 connector)      │    └── main.c (多通道轮询)  │
+│       ↕ CH1, CH2      │                             │
 ├───────────────────────┴─────────────────────────────┤
 │          共享内存 (0x7E000000 - 0x7E3FFFFF)         │
 └─────────────────────────────────────────────────────┘
 ```
 
-### 1.1 hvisor
-
-Type-1 Hypervisor，运行在 EL2。
-
-职责：
-- VM 生命周期管理（启动 seL4 Zone 和 Linux Zone）
-- 共享内存物理页映射到各 Zone
-- HyperAMP 通信底层支撑
-- IVC（Inter-VM Communication）机制
-
-当前通信机制：基于共享内存 + polling，**不使用中断**。
-
-### 1.2 hvisor-tool
-
-Linux 侧的 CH0 通信工具。
-
-职责：
-- 通过 `/dev/hvisor` 映射共享内存物理页
-- 作为 **connector** 连接 seL4 已创建的 CH0 队列
-- 发送图片/文本加解密请求、Bulk 数据传输
-
-关键文件：
-- `hvisor-tool/tools/shm/hyperamp_linux_shm.c` — 队列初始化和收发逻辑
-- `hvisor-tool/tools/shm/hyperamp_linux_shm.h` — 队列结构定义
-
-**注意**：该工具调用 `hyperamp_linux_init(channel, is_creator)`，CH0 场景下 `is_creator=0`。
-
-### 1.3 sel4test（seL4 侧应用）
-
-seL4 侧只有一个统一的 rootserver 应用 `hyperamp-server`，它内部同时处理 CH0（加解密/验证）和 CH1（网络代理）两条通道。
-
-**重要：`front` 项目的代码已经被合并到 `hyperamp-server` 的构建系统中，不再作为独立应用运行。**
-
-#### hyperamp-server（统一 rootserver）
-
-构建产物：`hyperamp-server-image-arm-imx8mp-evk`
-
-内部模块划分：
-
-| 模块 | 文件 | 职责 |
-|------|------|------|
-| 主循环 | `src/main.c` | IPC 地址读取、双通道初始化、并发轮询 |
-| 通道抽象 | `src/channel.c`, `include/channel.h` | `ChannelContext` 结构体、cache 安全读写 |
-| CH0 处理 | `src/channel_ch0.c`, `include/channel_ch0.h` | Bulk/加密/解密/签名验证/字段校验 |
-| CH1 处理 | `src/channel_ch1.c`, `include/channel_ch1.h` | 封装 front 引擎、Session 管理、跨通道转发接口 |
-| CH0 辅助 | `include/ch0_utils.h` | 安全内存操作宏（从旧版 hyperamp-server 提取） |
-
-构建系统关键规则（`CMakeLists.txt`）：
-- `front/include` 在 include 路径中**优先于** `hyperamp-server/include`，确保使用 front 版本的 `hyperamp_shm_queue.h`
-- `front/src/*.c` 通过 `${FRONT_DIR}/src/` 直接引用，不使用 symlink
-- front 源文件和 `channel_ch1.c` 单独设置 `-Wno-error`，其余保持 `-Werror`
-
-#### front（网络代理前端源码库）
-
-**front 不再独立构建和运行**，它的源文件被 hyperamp-server 的 CMakeLists.txt 直接引用编译。
-
-front 提供的核心能力：
-- `frontend_sess_new()` / `frontend_sess_send()` / `frontend_sess_recv()` — Session API
-- `frontend_engine_run_hyperamp_once()` — 单轮消息处理（出队→协议解析→会话回调→F2B 发送）
-- `FrontendEngine` / `FrontendSession` / `FrontendSessionPool` — 会话管理框架
-- `hyperamp_shm_queue.c/h` — 统一的队列实现（front 版本为准）
-
-关键头文件：
-- `front/include/engine.h` — FrontendEngine 定义
-- `front/include/frontend_api.h` — 对外 API 声明
-- `front/include/session.h` — Session 和 IoT 会话定义
-- `front/include/hyperamp_shm_queue.h` — 队列结构（统一版本）
-- `front/include/message.h` — 代理协议消息定义
-
-### 1.4 HighSpeedCProxy
-
-Linux 侧网络代理后端。
-
-职责：
-- 作为 **connector** 连接 seL4 已创建的 CH1 队列
-- 接收 seL4 前端发来的 Session 管理和 DATA 消息
-- 通过真实 Linux 网络 socket 对外转发数据
-- 管理 epoll 事件循环和网络 I/O
-
-关键文件：
-- `HighSpeedCProxy/src/engine.c` — 后端引擎主循环
-- `HighSpeedCProxy/src/backend_proto.c` — 后端协议解析
-- `HighSpeedCProxy/src/shared_mem_io.c` — 共享内存 I/O
-- `HighSpeedCProxy/include/hyperamp_shm_queue.h` — 队列结构（与 front 版本一致）
+**组件状态**：
+1. **hvisor (EL2)**：提供硬件虚拟化、物理内存映射。当前版本不依赖中断。
+2. **hvisor-tool (Linux)**：CH0 的 Connector 端，负责发出图像/文本的加解密请求。
+3. **hyperamp-server (seL4)**：统一的后端。将原有的 `front` 源码库合并入编译系统（直接通过源码包含），在 `main.c` 中执行并发轮询。
+4. **HighSpeedCProxy (Linux)**：CH1 的 Connector 端，负责真正将 seL4 的网络代理包发往真实网卡。
+5. **预留 CH2**：设计用于未来的**远程内存访问 (Remote Memory Access)**，物理地址空间已在底层分配，供后续直接进行跨 VM 的内存级存取。
 
 ---
 
-## 2. 共享内存布局
+## 三、核心机制：数据流与跨通道桥接 (Cross-Channel Bridging)
 
-### 2.1 每个通道的内部结构
+跨通道桥接是系统的**核心亮点**。它实现了安全处理（CH0）与对外网络分发（CH1）的协同工作。
 
-```
-偏移 0x0000: RX Queue 控制块 (4KB) — Linux→seL4 方向
-偏移 0x1000: TX Queue 控制块 (4KB) — seL4→Linux 方向
-偏移 0x2000: Data Region (剩余空间) — Bulk 数据零拷贝区
-```
+### 数据流模型
+1. **独立的 CH0 请求/响应**（如普通解密/验签）：
+   Linux (hvisor-tool) ─CH0→ seL4 处理完成 ─CH0→ Linux (hvisor-tool)
+2. **独立的 CH1 代理流**：
+   seL4 (front engine) ─CH1→ Linux (cproxy) → 真实网络
+3. **CH0 → CH1 跨通道桥接 (加密/验证+对外分发)**：
+   Linux 将图像发入 CH0，seL4 完成加密处理后，不仅通过 CH0 回复已完成，还会将数据通过 CH1 分发到网络。
+   ```text
+   Linux (hvisor-tool) ──CH0──> seL4 (加解密/验签)
+                                      │ (仅针对加密服务)
+                                      ├── CH1 ──> Linux (cproxy) ──> 外部网络
+                                      └── CH0 ──> Linux (hvisor-tool)
+   ```
 
-**注意 TX/RX 方向是相对于 seL4 的**。Linux 侧看到的方向相反：
-- seL4 的 TX Queue = Linux 的 RX Queue
-- seL4 的 RX Queue = Linux 的 TX Queue
-
-### 2.2 i.MX8MP 平台物理地址分配
-
-| 通道 | 物理基址 | 大小 | TX Queue PA | RX Queue PA | Data PA |
-|------|----------|------|-------------|-------------|---------|
-| CH0 | `0x7E000000` | 2MB | `0x7E000000` | `0x7E001000` | `0x7E002000` |
-| CH1 | `0x7E200000` | 1MB | `0x7E200000` | `0x7E201000` | `0x7E202000` |
-| CH2 | `0x7E300000` | 1MB | `0x7E300000` | `0x7E301000` | `0x7E302000` |
-
-这些地址由 hvisor 在启动时映射，由 seL4 内核 `boot.c` 转换为虚拟地址并通过 IPC buffer `msg[2..10]` 传递给 rootserver。
-
-**绝对不要修改这些物理地址。**
-
-### 2.3 IPC Buffer 地址传递约定
-
-seL4 内核 `boot.c` 将虚拟地址写入 IPC buffer：
-
-```
-msg[2] = CH0 TX vaddr    msg[3] = CH0 RX vaddr    msg[4] = CH0 Data vaddr
-msg[5] = CH1 TX vaddr    msg[6] = CH1 RX vaddr    msg[7] = CH1 Data vaddr
-msg[8] = CH2 TX vaddr    msg[9] = CH2 RX vaddr    msg[10] = CH2 Data vaddr
-```
-
-**关键约束**：`seL4_GetMR()` 必须在任何 seL4 系统调用之前调用，否则 IPC buffer 内容会被覆盖。
+**工程实现限制**：
+`channel_ch0.c` 调用 `ch0_try_forward_bulk_to_ch1` 后，数据只放入了 CH1 内部的 `F2B (Front-to-Backend)` 队列。真实写入共享内存的操作是在下一次主循环执行 `ch1_process_message()` 中的引擎运转时发生的。
 
 ---
 
-## 3. 通道设计（已确定，不要修改）
+## 四、共享内存与物理约定
 
-### CH0 — 安全数据处理通道
+### 4.1 物理地址与通道容量 (千万不可更改)
+| 通道 | 物理基址 | 大小 | TX Queue (seL4方向) | RX Queue (seL4方向) | Data 区域 | 槽位 (Capacity) |
+|------|----------|------|--------------------|--------------------|-----------|-----------------|
+| CH0 | `0x7E000000` | 2MB | `0x7E000000` | `0x7E001000` | `0x7E002000` | 256 |
+| CH1 | `0x7E200000` | 1MB | `0x7E200000` | `0x7E201000` | `0x7E202000` | 253 |
+| CH2 | `0x7E300000` | 1MB | `0x7E300000` | `0x7E301000` | `0x7E302000` | 预留 |
 
-| 属性 | 值 |
-|------|-----|
-| 用途 | 图片/文本加解密、签名验证、字段校验、Bulk 数据处理 |
-| seL4 角色 | **creator**（初始化队列） |
-| Linux 角色 | **connector**（连接已有队列） |
-| seL4 应用 | hyperamp-server / channel_ch0 |
-| Linux 应用 | hvisor-tool (hyperamp_linux_shm) |
-| 队列容量 | 256 |
-| 允许消息类型 | `HYPERAMP_MSG_TYPE_BULK`, `HYPERAMP_MSG_TYPE_SERVICE`, `SERVICE_*` |
+*注意：TX/RX 的视角是以 seL4 为主的。对于 Linux 来说方向正好相反。*
+地址在内核态 `boot.c` 初始化，并通过 IPC buffer 的 `msg[2..10]` 传递给 rootserver。如果 IPC buffer 被污染（例如在提取地址前错误地执行了其他 syscall），内存映射会立即崩溃。
 
-### CH1 — 网络代理通道
-
-| 属性 | 值 |
-|------|-----|
-| 用途 | 网络代理前后端通信、跨通道转发的数据出口 |
-| seL4 角色 | **creator**（初始化队列） |
-| Linux 角色 | **connector**（连接已有队列） |
-| seL4 应用 | hyperamp-server / channel_ch1（封装 front 引擎） |
-| Linux 应用 | HighSpeedCProxy |
-| 队列容量 | 253 |
-| 允许消息类型 | `PROXY_MSG_TYPE_*`（Session/Data/Device/Strategy） |
-
-### CH2 — 预留
-
-暂不实现，地址已分配，通道定义已保留。
+### 4.2 Creator/Connector 身份逻辑
+为避免两个 VM 启动时死锁或竞态条件，系统强制规范身份：
+- **Creator (seL4 侧)**：负责 `magic` 初始化、`head/tail` 重置。
+- **Connector (Linux 侧)**：在 `hyperamp_linux_init` 时第二个参数传 `0`。只负责检测 `magic` 是否就绪，绝不清理队列。
 
 ---
 
-## 4. Creator / Connector 规则（极其重要）
+## 五、隐性工程知识与历史经验池 (Implicit Knowledge)
 
-每个物理通道只能有**一个 creator**。不同通道之间互不影响。
+这是大量排雷过程留下的“血泪教训”，任何修改前必须参考：
 
-| 行为 | Creator | Connector |
-|------|---------|-----------|
-| 初始化 queue 控制块 | ✅ 写入 magic、capacity、block_size | ❌ 不写入 |
-| 重置 head/tail 指针 | ✅ 清零 | ❌ 不碰 |
-| 清空 data region | ✅ 可选 | ❌ 不碰 |
-| 使用时机 | 先启动的一方 | 后连接的一方 |
+### 1. 缓存一致性迷雾 (Cache Coherency)
+**现象**：偶尔发生数据包截断、脏数据、头端乱码。
+**真相**：Linux 写入的数据停在 L1/L2 Cache 未刷入主存，或 seL4 直接读取了脏 Cache。
+**教训**：**绝对不要**绕过 `channel.c` 中提供的 `shm_read_buffer()` 和 `shm_write_buffer()`。手动从 Data Region 读写数据前后，必须严格执行 `hyperamp_cache_invalidate` 与 `hyperamp_cache_clean`。
 
-**当前约定**：
-- seL4 = creator（两个通道都是 seL4 先初始化）
-- Linux = connector
+### 2. Bulk 内存耗尽与引擎饥饿
+**历史**：过去在发送 1MB 大图时，seL4 经常发生 `insufficient memory resource` 错误并导致系统超时。
+**原因**：Bulk 数据被切分成几百个 4096 字节的块（Segment）并挤入 `F2B` 队列。此时 seL4 的堆内存被瞬间抽干。
+**修复约定**：在 `channel_ch0.c` 的转发死循环中，现在每成功入队一次或遇到压力时，都强制执行一遍 `frontend_engine_run_hyperamp_once()`，以促使引擎立即刷出内存，保证大文件传输时堆内存始终维持低水位。不要删除这个强制唤醒。
 
-**典型错误**：Linux 侧调用 `hyperamp_linux_init(channel, 1)` 意外走了 creator 分支，覆盖了 seL4 已建立的队列状态，导致双方状态机错乱、消息丢失。
+### 3. 返回值 0 (`HYPERAMP_OK`) 陷阱
+**历史**：`ch1_forward_bulk_raw_data` 曾返回 0 表示发送成功，导致外层 `pos += ret` 彻底陷入无限循环 (0 递增)。
+**修复约定**：转发接口（非协议 Header 接口）必须透传底层成功发送的真实字节数。
 
-正确用法：
-```c
-// Linux CH0: connector
-hyperamp_linux_init(0, 0);
-
-// Linux CH1: connector
-hyperamp_linux_init(1, 0);
-```
+### 4. 网络代理的首次超时 (First-time Session Overhead)
+**现象**：`hyperamp_linux` 第一次执行会抛出 `Timeout waiting for Bulk response`，但文件依然能生成，第二次之后全部正常。
+**原因**：首次通信需要 CH1 通过 `CREATE` 和 `RESP` 包与 `receiver.py` 建立 Session，这个 UDP 握手的延迟导致总体时间微超出客户端内硬编码的 5 秒。
+**教训**：这是正常的架构开销。
 
 ---
 
-## 5. 数据流与通道桥接
+## 六、构建指南与代码导航 (Agent Quickstart)
 
-### 5.1 CH0 独立数据流（加解密请求-响应）
-
-```
-Linux (hvisor-tool) ──CH0 RX──> seL4 (channel_ch0)
-                                      │ 处理（加密/解密/验签）
-Linux (hvisor-tool) <──CH0 TX── seL4 (ch0_send_reply / ch0_send_bulk_reply)
-```
-
-### 5.2 CH1 独立数据流（网络代理）
-
-```
-seL4 (channel_ch1) ──CH1 TX──> Linux (HighSpeedCProxy) ──> 外部网络
-seL4 (channel_ch1) <──CH1 RX── Linux (HighSpeedCProxy)
-```
-
-### 5.3 CH0 → CH1 跨通道桥接（安全处理-可信分发）
-
-这是系统的核心架构亮点。CH0 处理完加密类请求后，结果同时通过两条路径输出：
-
-```
-Linux (hvisor-tool) ──CH0──> seL4 (加解密/验签)
-                                   │ 处理完成
-                                   ├── CH1 ──> Linux (cproxy) ──> 外部网络   [网络分发]
-                                   └── CH0 ──> Linux (hvisor-tool)            [处理确认]
-```
-
-实现机制：
-- `channel_ch0.c` 在加密完成后调用 `ch0_try_forward_to_ch1()` 或 `ch0_try_forward_bulk_to_ch1()`
-- 这些函数内部调用 `ch1_forward_data()`（定义在 `channel_ch1.c`）
-- `ch1_forward_data()` 通过已建立的 `FrontendSession` 调用 `frontend_sess_send()`
-- 由于 CH0 和 CH1 在同一进程中，跨通道调用仅是函数调用，无需 IPC
-
-**选择性转发策略**：
-- 加密类服务（`SERVICE_ENCRYPT`、`SERVICE_VERIFY_ENCRYPT`、`SERVICE_VALIDATE_ENCRYPT`）→ 结果通过 CH1 分发
-- 解密类/验签类 → 仅通过 CH0 返回给请求方
-- CH1 未就绪时 → 静默跳过，不影响 CH0 正常应答（优雅降级）
-
----
-
-## 6. Polling 通信模型
-
-当前系统完全基于 polling，不使用中断。
-
-seL4 侧主循环（`main.c`）：
-```c
-while (1) {
-    // 轮询 CH0：处理加解密/验证请求
-    ch0_process_message(&g_ch0);
-
-    // 轮询 CH1：处理网络代理请求（含跨通道转发的实际发送）
-    ch1_process_message(&g_ch1);
-
-    // 空闲时轻量延迟
-}
-```
-
-`ch1_process_message()` 内部调用 `frontend_engine_run_hyperamp_once()`，它负责：
-1. 从 CH1 RX Queue 出队消息（Linux→seL4 方向）
-2. 协议解析（`frontend_proxy_msg_process`）
-3. 处理 B2F 活跃队列回调
-4. **将 F2B 队列中的待发数据写入 CH1 TX Queue**（包括跨通道桥接的数据）
-
-第 4 步至关重要：`ch0_try_forward_to_ch1()` 只是将数据放入 Session 的 F2B 消息队列，真正写入共享内存是在下一次 `ch1_process_message()` 时完成的。
-
----
-
-## 7. Cache 一致性规则（非常重要）
-
-所有通道操作必须遵守：
-
-| 操作 | Cache 动作 | 原因 |
-|------|-----------|------|
-| 从共享内存**读取**数据前 | `hyperamp_cache_invalidate()` | Linux 写入的数据可能只在 RAM 中，seL4 本地缓存是脏的 |
-| 向共享内存**写入**数据后 | `hyperamp_cache_clean()` | 确保 seL4 写入的数据刷回 RAM，Linux 能读到 |
-
-尤其需要注意的场景：
-- Bulk 数据传输（图片可能几百 KB 到几 MB）
-- Data Region 的直接读写
-- Queue 控制块的 head/tail 更新
-
-**绝大多数"偶现数据错误"都与 cache 有关。不要删除任何 cache maintenance 代码。**
-
-`channel.c` 中的 `shm_read_buffer()` 和 `shm_write_buffer()` 已经封装了 cache 操作。直接使用这些函数可以避免遗漏。
-
----
-
-## 8. Queue 数据结构要点
-
-`HyperampShmQueue` 是环形队列，关键字段：
-
-```c
-typedef struct {
-    uint32_t head;        // 写入位置（producer 推进）
-    uint32_t tail;        // 读取位置（consumer 推进）
-    uint16_t capacity;    // 最大槽位数
-    uint16_t block_size;  // 每个槽位大小（固定 4096）
-    uint32_t magic;       // 初始化标记 0x48415150 ("HAQP")
-    HyperampSpinLock lock; // 跨 VM 自旋锁
-    // ... 统计计数器
-} HyperampShmQueue;
-```
-
-**关键约束**：
-- `block_size` 固定 4096 字节，消息（含 header）不能超过此大小
-- `capacity` 由通道内存大小决定（CH0=256, CH1=253）
-- `magic` 用于 connector 判断 creator 是否已初始化
-- `head == tail` 表示队列为空
-
----
-
-## 9. 构建与部署
-
-### 编译
-
+### 编译流水线
 ```bash
 cd sel4test
 rm -rf cbuild && mkdir cbuild && cd cbuild
@@ -356,69 +134,11 @@ rm -rf cbuild && mkdir cbuild && cd cbuild
 ninja
 ```
 
-产物：`cbuild/images/hyperamp-server-image-arm-imx8mp-evk`
+### 代码阅读链路 (推荐顺序)
+1. **基石层**：`front/include/hyperamp_shm_queue.h` 和 `front/src/hyperamp_shm_queue.c` (队列核心)
+2. **入口层**：`hyperamp-server/src/main.c` (IPC读取，双通道初始化，大轮询)
+3. **协议层**：`hyperamp-server/src/channel.c` (含安全的 Cache 维护封装)
+4. **业务层 CH0**：`hyperamp-server/src/channel_ch0.c` (加解密服务与 `ch0_try_forward_bulk_to_ch1` 桥接点)
+5. **业务层 CH1**：`hyperamp-server/src/channel_ch1.c` (向 `cproxy` 对接的网络前置栈)
 
-### 运行测试步骤
-
-1. 启动 Linux Zone
-2. 运行网络代理后端：`./cproxy > cproxy.log 2>&1 &`
-3. 启动 seL4 Zone（加载 hyperamp-server 镜像）
-4. 等待 cproxy.log 中出现 `high_speed_create_sess_active returns successfully!`（CH1 Session 建立）
-5. 发送加密请求：`./hyperamp_linux -B -e @received.png -o encrypted.bin`
-6. 验证：
-   - seL4 串口出现 `[CH0→CH1] ✓ Bulk 数据网络分发完成` → 跨通道桥接成功
-   - cproxy.log 出现 DATA 消息 → Linux 后端收到加密数据
-   - `encrypted.bin` 正常生成 → CH0 应答路径正常
-
----
-
-## 10. 类型安全约定
-
-- seL4 用户态代码**必须使用 `seL4_Word`**，不要使用内核态的 `word_t`
-- IPC buffer 读取使用 `seL4_GetMR()`，返回类型为 `seL4_Word`
-- 共享内存指针必须标记 `volatile`
-- `HYPERAMP_AGAIN` 返回值统一为 `1`（front 版本），不要使用旧版的 `-2`
-
----
-
-## 11. 代码阅读顺序
-
-进入项目后按以下顺序建立理解：
-
-**第一层：理解队列和共享内存**
-1. `front/include/hyperamp_shm_queue.h` — 队列结构定义
-2. `front/src/hyperamp_shm_queue.c` — 队列 enqueue/dequeue 实现
-3. `hyperamp-server/src/channel.c` — cache 安全的读写封装
-
-**第二层：理解通道抽象和主循环**
-4. `hyperamp-server/include/channel.h` — ChannelContext 结构
-5. `hyperamp-server/src/main.c` — IPC 地址读取、双通道初始化、轮询循环
-
-**第三层：理解业务处理**
-6. `hyperamp-server/src/channel_ch0.c` — CH0 加解密/验签/Bulk 处理 + 跨通道转发
-7. `hyperamp-server/src/channel_ch1.c` — CH1 前端引擎封装 + Session 管理 + `ch1_forward_data`
-
-**第四层：理解网络代理协议栈（按需）**
-8. `front/src/engine.c` — FrontendEngine 主循环
-9. `front/include/frontend_api.h` — Session API 声明
-10. `HighSpeedCProxy/src/engine.c` — 后端引擎（Linux 侧）
-
----
-
-## 12. 工程思维方式
-
-这个项目不是 socket 通信、RPC 框架或普通 IPC。它是：
-
-- **低层共享内存通信** — 直接操作物理内存映射
-- **Cache 敏感** — 每次读写都必须考虑缓存一致性
-- **物理地址绑定** — 地址由 hypervisor 在启动时固定
-- **Queue 驱动** — 所有通信通过 SPSC 环形队列
-- **Polling 驱动** — 无中断，主循环持续轮询
-
-你必须始终关注：
-- 物理内存所有权（谁写了这块内存？cache 是否同步？）
-- Queue 的 producer/consumer 正确性（head/tail 谁推进？）
-- 跨 VM 并发安全（spinlock 的 acquire/release 语义）
-- 通道隔离（CH0 消息不要混入 CH1 处理流程）
-
-而不是高层网络抽象。
+> **Agent 确认指令**：当你接到这个项目的维护任务时，请优先确认你理解了 Cache 一致性和 Creator/Connector 的隔离原则。祝你好运。
