@@ -431,7 +431,7 @@ int frontend_sess_send(struct FrontendSession *sess, uint8_t *data, uint32_t siz
     uint8_t           *src_ptr;
 
     utils_print("In %s\n, preparing to send data:", __func__);
-    DUMP_BUFFER_CONTENT(data, size, "%c");
+    // DUMP_BUFFER_CONTENT(data, size, "%c"); /* 严重性能问题：切勿在发大文件时开启全量十六进制/字符打印！*/
     /* 1. Parameter Validation */
     if (NULL == sess || NULL == data || 0 == size) {
         error_print("frontend_sess_send failed: invalid parameters!\n");

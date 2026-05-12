@@ -20,6 +20,9 @@
 /* CH0 数据区大小：2MB 通道 - 8KB 队列 */
 #define CH0_DATA_SIZE   (2 * 1024 * 1024 - 8192)
 
+/* 为了解决内存耗尽问题，引入 engine 单次运行函数以释放内存池 */
+extern void frontend_engine_run_hyperamp_once(void);
+
 /* ==================== 辅助函数 ==================== */
 
 static void ch0_print_hex(const uint8_t *data, size_t len, size_t max_display)
@@ -105,57 +108,95 @@ static int ch0_send_bulk_reply(ChannelContext *ctx, HyperampBulkDescriptor *desc
 /* ==================== CH0→CH1 跨通道转发 ==================== */
 
 /**
- * @brief 将 CH0 处理结果转发到 CH1 网络代理
+ * @brief 将普通消息的 CH0 处理结果转发到 CH1 文本端口 (8888)
  *
- * 如果 CH1 Session 已就绪，将数据通过网络代理分发。
+ * 用于非 Bulk 的加密结果。自动添加 ForwardHeader。
  * 转发失败不影响 CH0 正常应答流程（graceful fallback）。
  */
-static int ch0_try_forward_to_ch1(const uint8_t *data, size_t len)
+static int ch0_try_forward_to_ch1(const uint8_t *data, size_t len,
+                                    uint8_t service_id)
 {
-    if (!ch1_is_ready()) {
-        printf("[CH0→CH1] CH1 未就绪，跳过网络分发\n");
+    if (!ch1_is_text_ready()) {
+        printf("[CH0→CH1] 文本 Session 未就绪，跳过网络分发\n");
         return HYPERAMP_ERROR;
     }
-    return ch1_forward_data(data, len);
+    return ch1_forward_text_data(data, len, service_id);
 }
 
 /**
- * @brief 将 Bulk 共享内存中的处理结果分块转发到 CH1
+ * @brief 将 Bulk 共享内存中的处理结果分块转发到 CH1 图片端口 (8889)
  *
- * 由于共享内存数据可能很大（图片），采用分块读取+转发，
- * 避免在栈上分配过大的缓冲区。
+ * 先发送 ForwardHeader（通过 ch1_forward_bulk_data 自动完成），
+ * 然后分块读取共享内存数据并逐块发送。
+ *
+ * 注意：ForwardHeader 在第一块之前由 ch1_forward_bulk_data 自动发送，
+ * 后续分块直接通过 frontend_sess_send 发送（不重复发 header）。
  */
 static int ch0_try_forward_bulk_to_ch1(ChannelContext *ctx,
-                                        uint32_t offset, uint32_t length)
+                                        uint32_t offset, uint32_t length,
+                                        uint8_t service_id)
 {
-    if (!ch1_is_ready()) {
-        printf("[CH0→CH1] CH1 未就绪，跳过 Bulk 数据网络分发\n");
+    if (!ch1_is_bulk_ready()) {
+        printf("[CH0→CH1] Bulk Session 未就绪，跳过 Bulk 数据网络分发\n");
         return HYPERAMP_ERROR;
     }
 
     volatile uint8_t *src = (volatile uint8_t *)((uintptr_t)ctx->data_region + offset);
 
-    /* 分块转发，每块 4096 bytes */
+    /*
+     * 对于 Bulk 数据，先把整块数据拼接后一次性调用 ch1_forward_bulk_data，
+     * 让其自动发送 ForwardHeader + 数据。
+     * 但如果数据很大，需要分块。这里策略：
+     *   第一块：通过 ch1_forward_bulk_data 发送（含 ForwardHeader）
+     *   后续块：直接通过底层接口发送（不再发 ForwardHeader）
+     */
     #define FORWARD_CHUNK_SIZE 4096
     uint8_t chunk_buf[FORWARD_CHUNK_SIZE];
     uint32_t remaining = length;
     uint32_t pos = 0;
+    int first_chunk = 1;
 
     while (remaining > 0) {
         uint32_t chunk = (remaining > FORWARD_CHUNK_SIZE) ? FORWARD_CHUNK_SIZE : remaining;
         hyperamp_safe_memcpy(chunk_buf, (void *)(src + pos), chunk);
 
-        int ret = ch1_forward_data(chunk_buf, chunk);
-        if (ret != HYPERAMP_OK) {
-            printf("[CH0→CH1] Bulk 分块转发中断，已发送 %u/%u bytes\n", pos, length);
-            return HYPERAMP_ERROR;
+        int ret;
+        if (first_chunk) {
+            /* 第一块：通过 ch1_forward_bulk_data 发送，它会自动添加 ForwardHeader */
+            ret = ch1_forward_bulk_data(chunk_buf, chunk, service_id, length);
+            if (ret == HYPERAMP_OK) {
+                first_chunk = 0;
+                pos += chunk;
+                remaining -= chunk;
+                /* 发送完第一块后，强制运行一次引擎来释放内存并刷入共享内存 */
+                frontend_engine_run_hyperamp_once();
+            } else {
+                printf("[CH0→CH1] Bulk 第一块转发中断\n");
+                return HYPERAMP_ERROR;
+            }
+        } else {
+            /* 后续块：直接发送数据到 bulk 端口，不再加 header */
+            ret = ch1_forward_bulk_raw_data(chunk_buf, chunk);
+            if (ret < 0) {
+                printf("[CH0→CH1] Bulk 分块转发中断，已发送 %u/%u bytes\n", pos, length);
+                return HYPERAMP_ERROR;
+            }
+            if (ret == 0) {
+                /* 队列满或内存不足，执行一次引擎运转释放内存，然后重试当前块 */
+                frontend_engine_run_hyperamp_once();
+                continue; /* 重试这个块 */
+            }
+            
+            /* 累加实际成功放入队列的字节数 */
+            pos += ret;
+            remaining -= ret;
+            
+            /* 强制运行一次引擎来释放内存，确保堆内存永远不会耗尽 */
+            frontend_engine_run_hyperamp_once();
         }
-
-        pos += chunk;
-        remaining -= chunk;
     }
 
-    printf("[CH0→CH1] ✓ Bulk 数据网络分发完成 (%u bytes)\n", length);
+    printf("[CH0→CH1] ✓ Bulk 数据已转发至图片端口 (port 8889, %u bytes)\n", length);
     return HYPERAMP_OK;
 }
 
@@ -182,8 +223,8 @@ static int ch0_service_encrypt(ChannelContext *ctx, volatile void *data_ptr, siz
         result_buf[i] ^= 0x5A;
     }
 
-    /* 尝试通过 CH1 网络代理分发加密结果 */
-    ch0_try_forward_to_ch1(result_buf, result_len);
+    /* 尝试通过 CH1 文本端口 (8888) 分发加密结果 */
+    ch0_try_forward_to_ch1(result_buf, result_len, SERVICE_ENCRYPT);
 
     /* CH0 仍然返回应答（处理完成确认） */
     int ret = ch0_send_reply(ctx, (const char *)result_buf, result_len,
@@ -206,8 +247,8 @@ static int ch0_service_decrypt(ChannelContext *ctx, volatile void *data_ptr, siz
         result_buf[i] ^= 0x5A;
     }
 
-    /* 尝试通过 CH1 网络代理分发解密结果 */
-    ch0_try_forward_to_ch1(result_buf, result_len);
+    /* 尝试通过 CH1 文本端口 (8888) 分发解密结果 */
+    ch0_try_forward_to_ch1(result_buf, result_len, SERVICE_DECRYPT);
 
     /* CH0 仍然返回应答 */
     int ret = ch0_send_reply(ctx, (const char *)result_buf, result_len,
@@ -402,7 +443,11 @@ static int ch0_process_bulk(ChannelContext *ctx, void *payload_ptr, size_t len)
             case SERVICE_ENCRYPT:
             case SERVICE_VERIFY_ENCRYPT:
             case SERVICE_VALIDATE_ENCRYPT:
-                ch0_try_forward_bulk_to_ch1(ctx, desc->offset, desc->length);
+            case SERVICE_DECRYPT:
+            case SERVICE_VERIFY_DECRYPT:
+            case SERVICE_VALIDATE_DECRYPT:
+                ch0_try_forward_bulk_to_ch1(ctx, desc->offset, desc->length,
+                                              (uint8_t)desc->service_id);
                 break;
             default:
                 break;

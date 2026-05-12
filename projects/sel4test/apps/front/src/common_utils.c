@@ -285,6 +285,14 @@ int parse_proxy_protocol_and_print(const uint8_t *buffer) {
             break;
         }
 
+        case 0x10: /* HYPERAMP_MSG_TYPE_SERVICE */
+            printf("[SERVICE MSG] Service ID=%u, PayloadLen=%hu\n", hdr->frontend_sess_id, hdr->payload_len);
+            break;
+            
+        case 0x20: /* HYPERAMP_MSG_TYPE_BULK */
+            printf("[BULK MSG] PayloadLen=%hu\n", hdr->payload_len);
+            break;
+
         default:
             printf("[PROXY_PARSE_ERR] Unknown Proxy Message Type: %u\n", hdr->proxy_msg_type);
             return FRONTEND_PROXY_PROCESS_ERROR;

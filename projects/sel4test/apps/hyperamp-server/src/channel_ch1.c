@@ -1,8 +1,10 @@
 /*
- * CH1 通道处理模块实现 — 网络代理
+ * CH1 通道处理模块实现 — 网络代理（双 Session 分类转发）
  *
- * 通过设置 front 引擎的全局变量并调用 front 的初始化和轮询函数，
- * 实现 CH1 网络代理处理。避免重复实现 front 的复杂协议栈逻辑。
+ * Session A (port 8888): 文本/小文件加密结果
+ * Session B (port 8889): 图片/大文件 Bulk 加密结果
+ *
+ * 每次转发前自动添加 ForwardHeader，接收端据此分文件保存。
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -31,32 +33,63 @@ extern volatile HyperampShmQueue *g_hyper_tx_queue;
 extern volatile HyperampShmQueue *g_hyper_rx_queue;
 extern volatile void *g_hyper_data_region;
 
-/* CH1 活跃 Session 句柄（供跨通道转发使用） */
-static struct FrontendSession *g_ch1_active_session = NULL;
+/* ==================== 双 Session 管理 ==================== */
+
+/* 文本 Session (port 8888) — 普通消息加密结果 */
+static struct FrontendSession *g_ch1_text_session = NULL;
+
+/* Bulk Session (port 8889) — 图片/大文件加密结果 */
+static struct FrontendSession *g_ch1_bulk_session = NULL;
+
+/* 转发请求序号（全局自增，用于日志追踪） */
+static uint32_t g_forward_seq = 0;
+
+/* ==================== Session 事件回调 ==================== */
 
 /**
- * @brief CH1 专用的 Session 事件回调
- *
- * 替换 default_session_event_callback，后者在 CONN 事件时
- * 会自动发送 "test msg"，可能因目标无监听而触发 ICMP 错误，
- * 导致后端关闭 Session。此回调仅记录日志，不主动发送数据。
+ * @brief 文本 Session 事件回调
  */
-static void ch1_session_event_callback(struct FrontendSession *sess,
-                                        FrontendSessionEvent event)
+static void ch1_text_session_callback(struct FrontendSession *sess,
+                                       FrontendSessionEvent event)
 {
     switch (event) {
         case FRONTEND_SESS_EVENT_CONN:
-            printf("[CH1] Session 已连接，跨通道转发就绪\n");
+            printf("[CH1] 文本 Session (8888) 已连接\n");
             break;
         case FRONTEND_SESS_EVENT_RECVDATA:
-            printf("[CH1] 收到后端数据\n");
+            printf("[CH1] 文本 Session 收到后端数据\n");
             break;
         case FRONTEND_SESS_EVENT_CLOSE:
-            printf("[CH1] Session 已关闭\n");
-            g_ch1_active_session = NULL;
+            printf("[CH1] 文本 Session 已关闭\n");
+            g_ch1_text_session = NULL;
             break;
         case FRONTEND_SESS_EVENT_ABNORMAL:
-            printf("[CH1] Session 异常\n");
+            printf("[CH1] 文本 Session 异常\n");
+            break;
+        default:
+            break;
+    }
+}
+
+/**
+ * @brief Bulk Session 事件回调
+ */
+static void ch1_bulk_session_callback(struct FrontendSession *sess,
+                                       FrontendSessionEvent event)
+{
+    switch (event) {
+        case FRONTEND_SESS_EVENT_CONN:
+            printf("[CH1] Bulk Session (8889) 已连接\n");
+            break;
+        case FRONTEND_SESS_EVENT_RECVDATA:
+            printf("[CH1] Bulk Session 收到后端数据\n");
+            break;
+        case FRONTEND_SESS_EVENT_CLOSE:
+            printf("[CH1] Bulk Session 已关闭\n");
+            g_ch1_bulk_session = NULL;
+            break;
+        case FRONTEND_SESS_EVENT_ABNORMAL:
+            printf("[CH1] Bulk Session 异常\n");
             break;
         default:
             break;
@@ -135,28 +168,34 @@ int ch1_init(ChannelContext *ctx)
 
     printf("[CH1] 网络代理子系统初始化完成\n");
 
-    /* 
-     * 建立网络代理 Session，用于：
-     * 1. CH0 安全处理后结果的跨通道分发
-     * 2. 验证前后端通信链路
+    /*
+     * 创建双 Session：
+     *   Session A (port 8888) — 文本/小文件加密结果
+     *   Session B (port 8889) — 图片/大文件 Bulk 加密结果
      */
-    printf("[CH1] 正在建立网络代理 Session...\n");
-    struct FrontendSession *sess = frontend_sess_new(p_g_fr_eng);
-    if (sess) {
-        /*
-         * 绑定自定义回调，替换默认的 default_session_event_callback。
-         * 默认回调在 CONN 事件时会自动发送 "test msg"，如果目标端口
-         * 没有监听程序，会触发 ICMP Port Unreachable → epoll error →
-         * 后端关闭 Session → 后续跨通道转发的数据无法送达。
-         */
-        frontend_sess_bind_callback(sess, ch1_session_event_callback);
 
-        ret = frontend_sess_connect_by_addrstr(sess, SESS_UDP_PROTO, "192.168.137.2:8888");
-        printf("[CH1] Session 连接请求已发送 (ret=%d)\n", ret);
-        /* 保存 Session 句柄，供 CH0 跨通道转发使用 */
-        g_ch1_active_session = sess;
+    /* Session A: 文本端口 */
+    printf("[CH1] 正在建立文本 Session (port 8888)...\n");
+    struct FrontendSession *text_sess = frontend_sess_new(p_g_fr_eng);
+    if (text_sess) {
+        frontend_sess_bind_callback(text_sess, ch1_text_session_callback);
+        ret = frontend_sess_connect_by_addrstr(text_sess, SESS_UDP_PROTO, "192.168.137.2:8888");
+        printf("[CH1] 文本 Session 连接请求已发送 (ret=%d)\n", ret);
+        g_ch1_text_session = text_sess;
     } else {
-        printf("[CH1] 警告：Session 创建失败，跨通道转发将不可用\n");
+        printf("[CH1] 警告：文本 Session 创建失败\n");
+    }
+
+    /* Session B: Bulk/图片端口 */
+    printf("[CH1] 正在建立 Bulk Session (port 8889)...\n");
+    struct FrontendSession *bulk_sess = frontend_sess_new(p_g_fr_eng);
+    if (bulk_sess) {
+        frontend_sess_bind_callback(bulk_sess, ch1_bulk_session_callback);
+        ret = frontend_sess_connect_by_addrstr(bulk_sess, SESS_UDP_PROTO, "192.168.137.2:8889");
+        printf("[CH1] Bulk Session 连接请求已发送 (ret=%d)\n", ret);
+        g_ch1_bulk_session = bulk_sess;
+    } else {
+        printf("[CH1] 警告：Bulk Session 创建失败\n");
     }
 
     return HYPERAMP_OK;
@@ -173,41 +212,110 @@ int ch1_process_message(ChannelContext *ctx)
      * 1. 从 hyper_rx_queue 出队消息
      * 2. 经过 frontend_proxy_msg_process() 解析代理协议
      * 3. 处理 B2F 活跃队列的回调
-     * 4. 处理 F2B 活跃队列的数据发送
+     * 4. 处理 F2B 活跃队列的数据发送（包括双 Session 的数据）
      */
     frontend_engine_run_hyperamp_once();
 
     return HYPERAMP_OK;
 }
 
-/* ==================== CH1 跨通道转发接口 ==================== */
+/* ==================== 就绪状态检查 ==================== */
+
+int ch1_is_text_ready(void)
+{
+    if (!g_ch1_text_session) return 0;
+    return (g_ch1_text_session->sess_state == FRONTEND_SESS_CONNECTED) ? 1 : 0;
+}
+
+int ch1_is_bulk_ready(void)
+{
+    if (!g_ch1_bulk_session) return 0;
+    return (g_ch1_bulk_session->sess_state == FRONTEND_SESS_CONNECTED) ? 1 : 0;
+}
 
 int ch1_is_ready(void)
 {
-    if (!g_ch1_active_session) return 0;
-    /* Session 状态 FRONTEND_SESS_CONNECTED = 2 */
-    return (g_ch1_active_session->sess_state == FRONTEND_SESS_CONNECTED) ? 1 : 0;
+    return ch1_is_text_ready() || ch1_is_bulk_ready();
+}
+
+/* ==================== 内部转发辅助 ==================== */
+
+/**
+ * @brief 通过指定 Session 发送 ForwardHeader + 数据
+ */
+static int ch1_send_with_header(struct FrontendSession *sess,
+                                 const uint8_t *data, size_t len,
+                                 uint8_t service_id, uint8_t is_bulk,
+                                 uint32_t total_length,
+                                 const char *label)
+{
+    if (!sess) {
+        printf("[CH0→CH1] %s 转发失败：Session 未建立\n", label);
+        return HYPERAMP_ERROR;
+    }
+
+    if (sess->sess_state != FRONTEND_SESS_CONNECTED) {
+        printf("[CH0→CH1] %s 转发失败：Session 未就绪 (state=%d)\n",
+               label, sess->sess_state);
+        return HYPERAMP_ERROR;
+    }
+
+    g_forward_seq++;
+
+    /* 发送 ForwardHeader */
+    ForwardHeader hdr;
+    hdr.magic      = FORWARD_HEADER_MAGIC;
+    hdr.service_id = service_id;
+    hdr.is_bulk    = is_bulk;
+    hdr.reserved   = 0;
+    hdr.total_len  = total_length;
+
+    int ret = frontend_sess_send(sess, (uint8_t *)&hdr, sizeof(ForwardHeader));
+    if (ret < 0) {
+        printf("[CH0→CH1] %s 转发失败：ForwardHeader 发送失败 (ret=%d)\n", label, ret);
+        return HYPERAMP_ERROR;
+    }
+
+    printf("[CH0→CH1] 转发描述头已发送: seq=%u, service=%u, bulk=%u, total_len=%u\n",
+           g_forward_seq, service_id, is_bulk, total_length);
+
+    /* 发送实际数据 */
+    ret = frontend_sess_send(sess, (uint8_t *)data, (uint32_t)len);
+    if (ret >= 0) {
+        printf("[CH0→CH1] ✓ %s 数据已转发 (%zu bytes, seq=%u)\n", label, len, g_forward_seq);
+        return HYPERAMP_OK;
+    }
+
+    printf("[CH0→CH1] ✗ %s 数据转发失败 (ret=%d)\n", label, ret);
+    return HYPERAMP_ERROR;
+}
+
+/* ==================== 公开转发接口 ==================== */
+
+int ch1_forward_text_data(const uint8_t *data, size_t len, uint8_t service_id)
+{
+    return ch1_send_with_header(g_ch1_text_session, data, len,
+                                service_id, 0, (uint32_t)len, "文本");
+}
+
+int ch1_forward_bulk_data(const uint8_t *data, size_t len, uint8_t service_id, uint32_t total_length)
+{
+    return ch1_send_with_header(g_ch1_bulk_session, data, len,
+                                service_id, 1, total_length, "Bulk");
 }
 
 int ch1_forward_data(const uint8_t *data, size_t len)
 {
-    if (!g_ch1_active_session) {
-        printf("[CH0→CH1] 转发失败：Session 未建立\n");
+    /* 兼容旧接口：走文本 Session */
+    return ch1_forward_text_data(data, len, 0);
+}
+
+int ch1_forward_bulk_raw_data(const uint8_t *data, size_t len)
+{
+    if (!g_ch1_bulk_session || g_ch1_bulk_session->sess_state != FRONTEND_SESS_CONNECTED) {
+        printf("[CH0→CH1] Bulk 原始数据转发失败：Session 未就绪\n");
         return HYPERAMP_ERROR;
     }
-
-    if (g_ch1_active_session->sess_state != FRONTEND_SESS_CONNECTED) {
-        printf("[CH0→CH1] 转发失败：Session 未就绪 (state=%d)\n",
-               g_ch1_active_session->sess_state);
-        return HYPERAMP_ERROR;
-    }
-
-    int ret = frontend_sess_send(g_ch1_active_session, (uint8_t *)data, (uint32_t)len);
-    if (ret >= 0) {
-        printf("[CH0→CH1] ✓ 安全处理结果已提交网络代理分发 (%zu bytes)\n", len);
-        return HYPERAMP_OK;
-    }
-
-    printf("[CH0→CH1] ✗ 网络代理分发失败 (ret=%d)\n", ret);
-    return HYPERAMP_ERROR;
+    
+    return frontend_sess_send(g_ch1_bulk_session, (uint8_t *)data, (uint32_t)len);
 }
