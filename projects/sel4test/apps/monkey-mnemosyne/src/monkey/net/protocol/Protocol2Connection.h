@@ -79,6 +79,12 @@ public:
     Status decodeGetBlockDataVersion(protocol::Msg* msg, adl::int64_t* id);
     Status getBlockDataVersion(adl::int64_t blockId, adl::int64_t* dataVer);
 
+
+    // ------ 0xAF00 : Plain Text ------
+
+    Status sendPlainText(const adl::TString& text);
+    Status decodePlainText(protocol::Msg* msg, adl::TString* text);
+
 };
 
 

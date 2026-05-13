@@ -58,7 +58,9 @@ enum class MsgType : adl::uint32_t {
     UnrefBlock = 0x3007,
     GetBlockDataVersion = 0x3008,
 
-    PingPong = 0x4001
+    PingPong = 0x4001,
+
+    PlainText = 0xAF00,
 };
 
 

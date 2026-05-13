@@ -249,3 +249,22 @@ Status Protocol2Connection::getBlockDataVersion(adl::int64_t blockId, adl::int64
     return status;
 }
 
+
+// ------ 0xAF00 : Plain Text ------
+
+Status Protocol2Connection::sendPlainText(const adl::TString& text) {
+    return sendMsg(protocol::MsgType::PlainText, text.c_str(), text.length());
+}
+
+
+Status Protocol2Connection::decodePlainText(protocol::Msg* msg, adl::TString* text) {
+    if (!text)
+        return Status::INVALID_PARAMETERS;
+    
+    text->clear();
+    for (adl::size_t i = 0; i < msg->header.length; i++) {
+        text += (char) msg->data[i];
+    }
+    
+    return Status::SUCCESS;
+}
