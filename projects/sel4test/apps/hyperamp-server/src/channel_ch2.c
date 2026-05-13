@@ -64,6 +64,68 @@ int ch2_init(ChannelContext *ctx,
     return HYPERAMP_OK;
 }
 
+
+static struct MnemosyneData {
+    struct mnemosyne_session_s* session;
+    char next_ch;
+} mnemosyne_data = {
+    .session = NULL,
+    .next_ch = 'A'
+};
+
+
+static mnemosyne_session_t* connect_to_monkey_mnemosyne() {
+    printf("[Monkey] %s: %s", __func__, "Connecting to Monkey Mnemosyne server...\n");
+
+    mnemosyne_session_t* sess = mnemosyne_sess_new();
+    if (!sess) {
+        printf("[CH2] Error: Failed to create Monkey Mnemosyne session.\n");
+        return NULL;
+    }
+    
+#define _TOK_TO_STRING(x) #x
+#define TO_STRING(x) _TOK_TO_STRING(x)
+    const char* serverAddrStr = CH2_MNEMOSYNE_SERVER_IP ":" TO_STRING(CH2_MNEMOSYNE_SERVER_PORT);
+#undef TO_STRING
+#undef _TOK_TO_STRING
+
+    mnemosyne_sess_connect_by_addrstr_devid(
+        sess,
+        MNEMOSYNE_PROTO_TCP,
+        serverAddrStr,
+        MNEMOSYNE_DEV_AUTO
+    );
+
+    printf("[Monkey] Connected to Mnemosyne.");
+    return sess;
+}
+
+
+static void send_plain_text() {
+    if (mnemosyne_data.session == NULL)
+        return;
+
+    char ch = mnemosyne_data.next_ch++;
+    if (mnemosyne_data.next_ch > 'Z') {
+        mnemosyne_data.next_ch = 'A';
+    }
+
+    //              0         1         2         3         4
+    //              01234567890123456789012345678901234567890
+    char msg[  ] = "Next char is: _. Hello from seL4!";
+    msg[14] = ch;
+
+    int64_t checksum = 0;
+
+    int res = mnemosyne_sess_send_plain_text(mnemosyne_data.session, msg, &checksum);
+    if (res != 0) {
+        printf("[Monkey] Error while sending plain text: %d\n", res);
+        return;
+    }
+
+    printf("[Monkey seL4] send_plain_text: received checksum: %ld\n", checksum);
+}
+
 /* ==================== CH2 轮询处理 ==================== */
 
 int ch2_process_message(ChannelContext *ctx)
@@ -72,15 +134,18 @@ int ch2_process_message(ChannelContext *ctx)
         return HYPERAMP_ERROR;
     }
 
-    /*
-     * monkey-mnemosyne 的通信由 Session 内部自驱动
-     * （send/recv 直接操作 HyperAMP queue），
-     * 不需要像 CH1 的 frontend_engine 那样有独立的事件循环。
-     *
-     * 这里调用 mnemosyne_engine_run_hyperamp_once() 是为了保持
-     * 与 CH0/CH1 主循环结构的一致性。当前该函数为 no-op。
-     */
-    mnemosyne_engine_run_hyperamp_once();
+    
+    if (mnemosyne_data.session == NULL) {
+        mnemosyne_data.session = connect_to_monkey_mnemosyne();
+    }
+
+    if (mnemosyne_data.session == NULL) {
+        printf("[CH2] Error: Failed to init Monkey Mnemosyne session.\n");
+        return HYPERAMP_ERROR;
+    }
+
+    send_plain_text();
+
 
     return HYPERAMP_AGAIN;  /* 无显式工作产出 */
 }

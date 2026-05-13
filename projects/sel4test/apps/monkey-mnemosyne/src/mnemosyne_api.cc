@@ -567,6 +567,20 @@ extern "C" int mnemosyne_sess_recv(mnemosyne_session_t *sess,
 }
 
 
+extern "C" int mnemosyne_sess_send_plain_text(mnemosyne_session_t *sess, const char *text, int64_t* checksum)
+{
+    if (!sess->connected) {
+        Genode::error("[ERROR] Session not connected to Monkey Mnemosyne!");
+        return 1;
+    }
+
+    adl::TString str {text};
+    int status = (int) sess->client->plainText(str, checksum);
+
+    return status;
+}
+
+
 extern "C" void mnemosyne_sess_close(mnemosyne_session_t *sess)
 {
     if (!sess) return;

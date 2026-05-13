@@ -84,7 +84,7 @@ public:
 
     Status sendPlainText(const adl::TString& text);
     Status decodePlainText(protocol::Msg* msg, adl::TString* text);
-
+    Status plainText(const adl::TString& text, int64_t* checksum);
 };
 
 

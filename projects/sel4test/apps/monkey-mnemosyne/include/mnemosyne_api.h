@@ -272,6 +272,9 @@ int mnemosyne_sess_send(mnemosyne_session_t *sess,
 int mnemosyne_sess_recv(mnemosyne_session_t *sess,
                         void *buf, uint32_t size);
 
+
+int mnemosyne_sess_send_plain_text(mnemosyne_session_t *sess, const char *text, int64_t* checksum);
+
 /**
  * Close the session and release all resources.
  *

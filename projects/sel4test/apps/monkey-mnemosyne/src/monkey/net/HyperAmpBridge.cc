@@ -44,65 +44,6 @@ namespace {
 /* How often (in spin iterations) rxDequeueBlocking emits a heartbeat. */
 constexpr adl::int64_t kRxPollHeartbeatPeriod = 1'000'000;
 
-/*
- * Read head/tail/capacity/block_size/magic from a queue control block
- * using byte-by-byte accessors so we see exactly what the queue layer
- * sees.  Going via direct struct deref would risk losing a value to a
- * dirty cache line; the byte loop forces a fresh load for each byte and
- * pairs naturally with the cache invalidate just below.
- */
-void dumpQueueState(const char* tag, volatile HyperampShmQueue* q) {
-    if (!q) {
-        printf("[HyperAmpBridge][diag] %s: queue=NULL\n", tag);
-        return;
-    }
-    /* Make sure we observe the latest writes from the other side before
-     * sampling.  64 bytes covers the whole control prefix. */
-    hyperamp_cache_invalidate(q, 64);
-
-    const volatile uint8_t* p = (const volatile uint8_t*)q;
-
-    auto readU16 = [&](size_t off) -> uint16_t {
-        return (uint16_t)p[off] | ((uint16_t)p[off + 1] << 8);
-    };
-    auto readU32 = [&](size_t off) -> uint32_t {
-        return  (uint32_t)p[off]
-             | ((uint32_t)p[off + 1] << 8)
-             | ((uint32_t)p[off + 2] << 16)
-             | ((uint32_t)p[off + 3] << 24);
-    };
-
-    uint16_t head = readU16(offsetof(HyperampShmQueue, header));
-    uint16_t tail = readU16(offsetof(HyperampShmQueue, tail));
-    uint16_t cap  = readU16(offsetof(HyperampShmQueue, capacity));
-    uint16_t bs   = readU16(offsetof(HyperampShmQueue, block_size));
-    uint32_t mag  = readU32(offsetof(HyperampShmQueue, magic));
-    uint32_t enq  = readU32(offsetof(HyperampShmQueue, enqueue_count));
-    uint32_t deq  = readU32(offsetof(HyperampShmQueue, dequeue_count));
-
-    printf("[HyperAmpBridge][diag] %s: q=%p head=%u tail=%u cap=%u bs=%u "
-           "magic=0x%08x enq=%u deq=%u\n",
-           tag, (void*)q, (unsigned)head, (unsigned)tail,
-           (unsigned)cap, (unsigned)bs, (unsigned)mag,
-           (unsigned)enq, (unsigned)deq);
-}
-
-/*
- * Hex-dump the first `n` bytes of `data` to the console.  Used to verify
- * that the wire-format bytes we are about to enqueue (and the bytes we
- * just dequeued) match expectation.  Safe for n up to a few dozen bytes;
- * we don't expect to ever dump full 4 KiB blocks.
- */
-void dumpBytes(const char* tag, const void* data, adl::size_t n) {
-    const uint8_t* b = (const uint8_t*)data;
-    printf("[HyperAmpBridge][diag] %s (%u bytes):", tag, (unsigned)n);
-    for (adl::size_t i = 0; i < n; ++i) {
-        if ((i & 0xF) == 0) printf("\n  ");
-        printf(" %02x", (unsigned)b[i]);
-    }
-    printf("\n");
-}
-
 }  // namespace
 
 
@@ -285,16 +226,6 @@ void HyperAmpBridge::init(adl::uint8_t  channelId,
     initialized_ = true;
     MONKEY_LOG_INFO("[HyperAmpBridge] Initialised OK (ch=", (int)channelId,
                     ", capacity=", (int)capacity, ")");
-
-    /*
-     * DIAGNOSTIC: dump the queue control blocks immediately after
-     * creator-side init so we have a known-good baseline.  If the static
-     * asserts in hyperamp_shm_queue.h still pass and these reads come
-     * back as head=0 tail=0 magic=0x48415150, then layout / cache /
-     * mapping are all internally consistent on the seL4 side.
-     */
-    dumpQueueState("init/TX", txQueue_);
-    dumpQueueState("init/RX", rxQueue_);
 }
 
 
@@ -378,9 +309,7 @@ bool HyperAmpBridge::rxDequeueBlocking(void* buf, adl::size_t* outLen) {
             /* Queue empty – keep polling, with a throttled heartbeat. */
             ++pollCount;
             if (pollCount % kRxPollHeartbeatPeriod == 0) {
-                printf("[HyperAmpBridge][diag] rxDequeueBlocking: still polling "
-                       "(iter=%lld)\n", (long long)pollCount);
-                dumpQueueState("rxDequeueBlocking/RX", rxQueue_);
+                
             }
             continue;
         }
@@ -422,8 +351,6 @@ bool HyperAmpBridge::connect(const IP4Addr& ip,
     printf("[HyperAmpBridge][diag] connect(): ip=%s port=%u dev_id=0x%x fe_id=%u\n",
            ip.toString().c_str(), (unsigned)port, (unsigned)devId,
            (unsigned)frontendSessId_);
-    dumpQueueState("connect/TX-before", txQueue_);
-    dumpQueueState("connect/RX-before", rxQueue_);
 
     /*
      * Build the session-create message.
@@ -477,27 +404,11 @@ bool HyperAmpBridge::connect(const IP4Addr& ip,
     MONKEY_LOG_INFO("[HyperAmpBridge] Sending SESS_CREATE  fe_id=", frontendSessId_,
                     "  ip=", ip.toString().c_str(), ":", port);
 
-    /*
-     * DIAGNOSTIC: dump the assembled wire bytes so that, on the Linux
-     * side, we can hexdump the same physical page and confirm we are
-     * reading what seL4 wrote.  We dump just the protocol headers
-     * (8 + 10 + 10 = 28 bytes) – the slot tail is zero-padded by the
-     * memset above and not interesting.
-     */
-    dumpBytes("connect/SESS_CREATE-wire", msgBuf, totalLen);
-
     if (!txEnqueue(msgBuf, totalLen)) {
         MONKEY_LOG_ERROR("[HyperAmpBridge] connect() – txEnqueue failed");
         return false;
     }
 
-    /*
-     * DIAGNOSTIC: confirm head/tail advanced as expected after enqueue.
-     * Combined with connect/TX-before above, this isolates "did the
-     * write reach the queue control block?" from "is the Linux side
-     * not polling?".
-     */
-    dumpQueueState("connect/TX-after-enqueue", txQueue_);
 
     /*
      * Poll for the session-create response.
@@ -521,15 +432,6 @@ bool HyperAmpBridge::connect(const IP4Addr& ip,
         if (rxLen < HYPERAMP_MSG_HDR_SIZE) {
             continue;   // Malformed – skip.
         }
-
-        /*
-         * DIAGNOSTIC: we received SOMETHING – before we filter by message
-         * type / fe_id, dump the headers so a non-matching packet can be
-         * inspected without re-running the experiment.
-         */
-        dumpBytes("connect/RX-msg-headers",
-                  rxBuf,
-                  rxLen < 28u ? rxLen : 28u);
 
         const HyperampMsgHeader* rspHdr =
             reinterpret_cast<const HyperampMsgHeader*>(rxBuf);

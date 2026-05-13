@@ -268,3 +268,17 @@ Status Protocol2Connection::decodePlainText(protocol::Msg* msg, adl::TString* te
     
     return Status::SUCCESS;
 }
+
+
+Status Protocol2Connection::plainText(const adl::TString& text, int64_t* checksum) {
+    Status status = sendPlainText(text);
+    if (status != Status::SUCCESS) {
+        return status;
+    }
+
+    RECV_AND_HANDLE_RESPONSE(
+        if (!checksum)
+            break;
+        *checksum = adl::ntohq(*(adl::int64_t*) response->msg);
+    );
+}
