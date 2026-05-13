@@ -41,7 +41,7 @@ ip netns exec ns1 ip link set eth0 master br0
 ip netns exec ns1 ip addr flush dev eth0
 
 # alloc static IP in ns1
-ip netns exec ns1 ip addr add 192.168.31.62/24 dev br0
+ip netns exec ns1 ip addr add 192.168.137.2/24 dev br0
 ip netns exec ns1 ip link set br0 up
 
 # create tap0 and add to br0
