@@ -1,0 +1,84 @@
+/*
+    recursive lock
+
+    Created on 2025.6.22 at Minhang
+    By gongty
+*/
+
+#pragma once
+
+#include <base/mutex.h>
+#include <base/semaphore.h>
+#include <adl/stdint.h>
+#include <base/thread.h>
+
+namespace adl {
+
+
+class recursive_mutex {
+public:
+    adl::int64_t count = 0;
+    Genode::Mutex countMutex;
+    Genode::Thread* owner;  // only trusted when count is not 0.
+
+    Genode::Semaphore waitSemaphore {1};  // used to wait for lock.
+
+public:
+    recursive_mutex() {
+        
+    }
+
+    recursive_mutex(const recursive_mutex&) = delete;
+    recursive_mutex& operator=(const recursive_mutex&) = delete;
+
+
+    void lock() {
+        while (!try_lock())
+            waitSemaphore.down();
+    };
+
+
+    bool try_lock() {
+        Genode::Mutex::Guard _g {countMutex};
+        if (count > 0 && Genode::Thread::myself() == owner) {
+            count++;
+            return true;
+        }
+        else if (count == 0) {
+            owner = Genode::Thread::myself();
+            count++;
+            return true;
+        }
+        else {
+            return false;
+        }
+    };
+
+
+    void unlock() {
+        Genode::Mutex::Guard _g {countMutex};
+        if (count > 0) {
+            count--;
+            if (count == 0) { 
+                waitSemaphore.up();
+            }
+        }
+    };
+
+
+    class guard {
+    protected:
+        recursive_mutex& _mutex;
+    public:
+        explicit guard(recursive_mutex& mutex) : _mutex(mutex) {
+            _mutex.lock();
+        };
+
+        ~guard() {
+            _mutex.unlock();
+        };
+    };
+
+};
+
+};

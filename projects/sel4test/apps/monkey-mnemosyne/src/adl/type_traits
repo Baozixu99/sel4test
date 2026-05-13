@@ -1,0 +1,27 @@
+// 124033910070 GTY
+// gongty [at] tongji [dot] edu [dot] cn
+
+// created on 2024.11.25
+//   at Jiangchuan, Minhang, Shanghai
+
+// implements: https://cplusplus.com/reference/type_traits
+
+
+#pragma once
+
+namespace adl {
+
+
+struct true_type {
+    static constexpr bool value = true;
+    constexpr operator bool() const noexcept { return value; }
+};
+
+struct false_type {
+    static constexpr bool value = false;
+    constexpr operator bool() const noexcept { return value; }
+};
+
+
+}  // namespace adl
+

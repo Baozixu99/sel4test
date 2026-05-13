@@ -1,10 +1,11 @@
 /*
  * HyperAMP 多通道统一服务器 for seL4
  *
- * 合并 hyperamp-server (CH0) 和 front (CH1) 为单一应用，
- * 实现双通道并发轮询：
+ * 合并 hyperamp-server (CH0)、front (CH1)、monkey-mnemosyne (CH2) 为单一应用，
+ * 实现三通道并发轮询：
  *   - CH0: 图片/文本加解密与验证服务
  *   - CH1: 网络代理前后端通信
+ *   - CH2: 远程内存访问 (monkey-mnemosyne)
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -19,11 +20,13 @@
 #include "channel.h"
 #include "channel_ch0.h"
 #include "channel_ch1.h"
+#include "channel_ch2.h"
 
 /* ==================== 全局通道上下文 ==================== */
 
 static ChannelContext g_ch0;  /* CH0: 加解密/验证 */
 static ChannelContext g_ch1;  /* CH1: 网络代理 */
+static ChannelContext g_ch2;  /* CH2: 远程内存访问 */
 
 /* ==================== 平台初始化辅助 ==================== */
 
@@ -36,7 +39,7 @@ int main(void)
     printf("\n");
     printf("================================================\n");
     printf("  HyperAMP 多通道统一服务器 for seL4\n");
-    printf("  CH0: 加解密/验证  |  CH1: 网络代理\n");
+    printf("  CH0: 加解密/验证  |  CH1: 网络代理  |  CH2: 远程内存\n");
     printf("================================================\n\n");
 
     /*
@@ -45,10 +48,11 @@ int main(void)
      * 内核 boot.c 布局:
      *   msg[2..4] → CH0 (TX, RX, Data)
      *   msg[5..7] → CH1 (TX, RX, Data)
-     *   msg[8..10] → CH2 (TX, RX, Data) - 预留
+     *   msg[8..10] → CH2 (TX, RX, Data)
      *
      * 重要：不要在 seL4_GetMR() 之前插入任何 seL4 系统调用，
      * 否则 IPC buffer 内容会被覆盖！
+     * 必须在这里一次性读取所有通道的地址。
      */
     seL4_Word ch0_tx = seL4_GetMR(2);
     seL4_Word ch0_rx = seL4_GetMR(3);
@@ -56,12 +60,17 @@ int main(void)
     seL4_Word ch1_tx = seL4_GetMR(5);
     seL4_Word ch1_rx = seL4_GetMR(6);
     seL4_Word ch1_dt = seL4_GetMR(7);
+    seL4_Word ch2_tx = seL4_GetMR(8);
+    seL4_Word ch2_rx = seL4_GetMR(9);
+    seL4_Word ch2_dt = seL4_GetMR(10);
 
     printf("[Main] IPC buffer 共享内存地址:\n");
     printf("  CH0: TX=%p, RX=%p, Data=%p\n",
            (void *)ch0_tx, (void *)ch0_rx, (void *)ch0_dt);
     printf("  CH1: TX=%p, RX=%p, Data=%p\n",
            (void *)ch1_tx, (void *)ch1_rx, (void *)ch1_dt);
+    printf("  CH2: TX=%p, RX=%p, Data=%p\n",
+           (void *)ch2_tx, (void *)ch2_rx, (void *)ch2_dt);
 
     /* ==================== 初始化 CH0 ==================== */
 
@@ -90,11 +99,30 @@ int main(void)
         printf("[Main] CH1 地址无效，仅运行 CH0 模式\n");
     }
 
+    /* ==================== 初始化 CH2 ==================== */
+
+    printf("\n[Main] ===== 初始化 CH2 (远程内存访问) =====\n");
+    if (ch2_tx && ch2_rx && ch2_dt) {
+        if (channel_init(&g_ch2, CHANNEL_ID_CH2,
+                         ch2_tx, ch2_rx, ch2_dt, CH2_QUEUE_CAPACITY) != HYPERAMP_OK) {
+            printf("[Main] 警告：CH2 通道初始化失败\n");
+        } else {
+            /* 初始化远程内存访问子系统（传入外部读取的 vaddr） */
+            if (ch2_init(&g_ch2, ch2_tx, ch2_rx, ch2_dt) != HYPERAMP_OK) {
+                printf("[Main] 警告：CH2 远程内存子系统初始化失败\n");
+                g_ch2.initialized = 0;
+            }
+        }
+    } else {
+        printf("[Main] CH2 地址无效，跳过远程内存访问\n");
+    }
+
     /* ==================== 主轮询循环 ==================== */
 
     printf("\n[Main] ===== 进入主轮询循环 =====\n");
     printf("[Main] CH0: %s\n", g_ch0.initialized ? "已就绪" : "未启用");
     printf("[Main] CH1: %s\n", g_ch1.initialized ? "已就绪" : "未启用");
+    printf("[Main] CH2: %s\n", g_ch2.initialized ? "已就绪" : "未启用");
     printf("[Main] ==============================\n\n");
 
     int idle_count = 0;
@@ -118,6 +146,14 @@ int main(void)
             }
         }
 
+        /* 轮询 CH2：处理远程内存访问 */
+        if (g_ch2.initialized) {
+            int ret = ch2_process_message(&g_ch2);
+            if (ret == HYPERAMP_OK) {
+                had_work = 1;
+            }
+        }
+
         /* 空闲时轻量延迟，减少 CPU 占用 */
         if (!had_work) {
             idle_count++;
@@ -125,10 +161,11 @@ int main(void)
 
             /* 定期状态打印（每 100000 次空闲循环） */
             if (idle_count % 100000 == 0) {
-                printf("[Main] 轮询中... (idle=%d, CH0=%s, CH1=%s)\n",
+                printf("[Main] 轮询中... (idle=%d, CH0=%s, CH1=%s, CH2=%s)\n",
                        idle_count,
                        g_ch0.initialized ? "OK" : "OFF",
-                       g_ch1.initialized ? "OK" : "OFF");
+                       g_ch1.initialized ? "OK" : "OFF",
+                       g_ch2.initialized ? "OK" : "OFF");
             }
         } else {
             idle_count = 0;

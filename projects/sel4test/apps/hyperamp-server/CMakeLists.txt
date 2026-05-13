@@ -1,13 +1,13 @@
 #
 # HyperAMP 多通道统一服务器 for seL4
-# 合并 hyperamp-server (CH0) 和 front (CH1) 为单一 rootserver
+# 合并 hyperamp-server (CH0) + front (CH1) + monkey-mnemosyne (CH2) 为单一 rootserver
 #
 # SPDX-License-Identifier: BSD-2-Clause
 #
 
 cmake_minimum_required(VERSION 3.16.0)
 
-project(hyperamp-server C)
+project(hyperamp-server C CXX)
 
 find_package(musllibc REQUIRED)
 find_package(util_libs REQUIRED)
@@ -22,12 +22,17 @@ sel4_libs_import_libraries()
 # 获取 front 项目的路径
 set(FRONT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../front)
 
+# 获取 monkey-mnemosyne 项目路径并作为子目录引入（构建 monkey-mnemosyne-lib 静态库）
+set(MNEMOSYNE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../monkey-mnemosyne)
+add_subdirectory(${MNEMOSYNE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/monkey-mnemosyne)
+
 # hyperamp-server 自身的源文件
 set(HYPERAMP_SOURCES
     src/main.c
     src/channel.c
     src/channel_ch0.c
     src/channel_ch1.c
+    src/channel_ch2.c
 )
 
 # front 项目的源文件（直接引用原始路径，排除 front 自身的 main.c）
@@ -53,6 +58,7 @@ add_executable(hyperamp-server EXCLUDE_FROM_ALL
 target_include_directories(hyperamp-server PRIVATE
     ${FRONT_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${MNEMOSYNE_DIR}/include
 )
 
 target_link_libraries(hyperamp-server 
@@ -67,6 +73,7 @@ target_link_libraries(hyperamp-server
         sel4allocman
     PRIVATE
         utils
+        monkey-mnemosyne-lib
 )
 
 # Set executable properties 
@@ -77,8 +84,9 @@ foreach(front_src ${FRONT_SOURCES})
     set_source_files_properties(${front_src} PROPERTIES COMPILE_OPTIONS "-Wno-error;-g;-O2")
 endforeach()
 
-# channel_ch1.c 包含了 front 头文件，也需要禁用 -Werror
+# channel_ch1.c 和 channel_ch2.c 包含了外部头文件，也需要禁用 -Werror
 set_source_files_properties(src/channel_ch1.c PROPERTIES COMPILE_OPTIONS "-Wno-error;-g;-O2")
+set_source_files_properties(src/channel_ch2.c PROPERTIES COMPILE_OPTIONS "-Wno-error;-g;-O2")
 set_property(TARGET hyperamp-server PROPERTY C_STANDARD 99)
 
 # Set this image as the rootserver

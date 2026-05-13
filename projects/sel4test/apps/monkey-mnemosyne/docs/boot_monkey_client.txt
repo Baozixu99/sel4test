@@ -1,0 +1,71 @@
+
+备忘
+
+color     role        ip              port    term
+---------------------------------------------------
+RED       mnemosyne   192.168.31.60   10100   gty-acm2
+PINK      app1        any                     gty-acm0
+YELLOW    app2        any                     qzl
+
+
+
+setenv loadaddr 0x40400000; setenv fdt_addr 0x40000000; setenv zone0_kernel_addr 0xa0400000; setenv zone0_fdt_addr 0xa0000000; ext4load mmc 1:1 ${loadaddr} /home/arm64/hvisor.bin; ext4load mmc 1:1 ${fdt_addr} /home/arm64/OK8MP-C.dtb; ext4load mmc 1:1 ${zone0_kernel_addr} /home/arm64/Image; ext4load mmc 1:1 ${zone0_fdt_addr} /home/arm64/linux1.dtb; bootm ${loadaddr} - ${fdt_addr};
+
+
+bash
+cd home/arm64
+insmod hvisor.ko
+mount -t proc   proc   /proc
+mount -t sysfs sysfs /sys
+rm nohup.out
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+
+ps axj
+sleep 1
+
+# create ns1
+ip netns del ns1 2>/dev/null || true
+ip netns add ns1
+
+# move eth0 into ns1
+# ip link set dev eth0 address "02:01:00:00:00:01" # mnemosyne
+ip link set eth0 netns ns1
+sleep 1
+
+# config inside the ns1
+ip netns exec ns1 ip link set lo up
+ip netns exec ns1 ip link set eth0 up
+ip netns exec ns1 ip link add br0 type bridge
+ip netns exec ns1 ip link set eth0 master br0
+ip netns exec ns1 ip addr flush dev eth0
+
+# alloc static IP in ns1
+ip netns exec ns1 ip addr add 192.168.31.62/24 dev br0
+ip netns exec ns1 ip link set br0 up
+
+# create tap0 and add to br0
+ip netns exec ns1 ip tuntap add dev tap0 mode tap
+ip netns exec ns1 ip link set tap0 master br0
+ip netns exec ns1 ip link set dev tap0 up
+
+# ntpdate cn.pool.ntp.org
+
+cd ./cproxy.d
+export LD_LIBRARY_PATH=.:$LD_LIBRARY_PATH
+./cproxy > log.txt 2>&1 &
+sleep 2
+cat log.txt
+cd ..
+
+sleep 2
+
+ip netns exec ns1 ./monkey-mnemosyne &
+
+
+# start the hvisor sel4 system, within ns1
+ip netns exec ns1 nohup ./hvisor virtio start con_virtio.json &
+ip netns exec ns1 nohup ./hvisor zone start sel4.json
+
+# check vm status
+ip netns exec ns1 ./hvisor zone list

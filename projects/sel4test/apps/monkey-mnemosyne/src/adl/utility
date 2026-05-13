@@ -1,0 +1,43 @@
+// 124033910070 GTY
+// gongty [at] tongji [dot] edu [dot] cn
+
+// created on 2024.11.25
+//   at Jiangchuan, Minhang, Shanghai
+
+// reference: std: <utility>
+
+#pragma once
+
+namespace adl {
+
+
+template<class U, class V>
+struct pair {
+    U first;
+    V second;
+    pair(const U& first = U(), const V& second = V()) : first(first), second(second) {}
+};
+
+
+template<class U, class V>
+inline pair<U, V> make_pair(const U& first, const V& second) {
+    return pair {first, second};
+}
+
+
+template<class U, class V>
+struct ref_pair {
+    U& first;
+    V& second;
+    ref_pair(U& first, V& second) : first(first), second(second) {}
+};
+
+
+template<class U, class V>
+inline ref_pair<U, V> make_ref_pair(U& first, V& second) {
+    return ref_pair {first, second};
+}
+
+
+
+}  // namespace adl
