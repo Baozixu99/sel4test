@@ -12,24 +12,25 @@
 ## 一、系统现状快照
 
 **已验证、稳定运行的功能**：
-- CH0/CH1 多通道共享内存通信（polling 模式）
+- CH0/CH1/CH2 三通道共享内存通信（polling 模式，三通道并发轮询）
 - CH0 加解密 / 签名验证 / 字段校验 / Bulk 大文件处理
 - CH1 网络代理通信（Session 建立 + 数据转发）
+- CH2 远程内存访问（monkey-mnemosyne，4KiB 共享页读写，TCP 协议栈）
 - CH0 → CH1 跨通道桥接：加密和解密结果均可通过网络代理分发
 - Bulk 数据分块传输 + 引擎强制流转内存回收（支持 ~2MB 以内的文件）
 - Linux 侧 receiver.py 接收并落盘转发数据（.png 格式）
 - HyperAMP polling 通信链路稳定运行
 
-**未实现 / 调试中**：
-- CH2（远程内存访问）：物理地址已分配，IPC buffer 预留位已定义，但 `channel_ch2.c` 尚未创建，seL4 主循环中尚未接入 CH2 轮询。当前处于底层调试阶段。
+**未实现 / 规划中**：
 - 中断驱动通信模式（当前全部使用 polling）
+- CH2 的 Linux 侧 Connector（cproxy-B）尚未独立部署，当前 CH2 通过 seL4 内嵌的 HyperAmpBridge 直接驱动
 
 ---
 
 ## 二、系统操作铁律 (Agent Directives)
 
 ### [NEVER] 绝对禁止
-1. **不要打破多通道协议隔离**：CH0 (`channel_ch0.c`) 只处理加解密、验签及 Bulk 数据处理；CH1 (`channel_ch1.c`) 只负责网络代理协议栈封装；CH2 为预留通道，专用于远程内存访问 (Remote Memory Access)，**当前尚未实现**。各通道消息域绝不可混用，跨通道流转必须通过明确的接口桥接。
+1. **不要打破多通道协议隔离**：CH0 (`channel_ch0.c`) 只处理加解密、验签及 Bulk 数据处理；CH1 (`channel_ch1.c`) 只负责网络代理协议栈封装；CH2 (`channel_ch2.c`) 专用于远程内存访问 (Remote Memory Access)，通过 monkey-mnemosyne C++ 库实现。各通道消息域绝不可混用，跨通道流转必须通过明确的接口桥接。
 2. **不要擅自修改共享内存物理地址布局**：底层 Hypervisor 强绑定了特定的 PA (Physical Address)，任何偏移量或边界的修改会导致立刻崩溃。
 3. **不要引入基于中断 (Interrupt) 或信号量 (Semaphore) 的 IPC 模型**：目前极简的并发 Polling（轮询）模式比中断更稳定，且避免了复杂的虚实中断路由问题。
 4. **不要删除或合并 Cache 维护逻辑**：所有的 `hyperamp_cache_invalidate` 与 `hyperamp_cache_clean` 都是跨 VM 数据一致性的生命线。
@@ -39,13 +40,17 @@
 1. **尊重定长块 (Fixed Block Size)**：`HyperampShmQueue` 的 `block_size` 严格绑定为 4096 字节。超长数据必须进行 Bulk 分块逻辑处理。
 2. **遵守 seL4 的类型约定**：seL4 用户态必须使用 `seL4_Word`（而非内核态的 `word_t`），且 IPC 寄存器读取必须优先调用 `seL4_GetMR()`。
 3. **保持包含路径的优先级**：CMakeLists 中 `front/include` 永远优先于 `hyperamp-server/include`，以确保全局使用新版的 `hyperamp_shm_queue.h`。
+4. **monkey-mnemosyne 的 hyperamp_shm_queue.c 必须排除**：monkey-mnemosyne-lib 内部有一份精简版的 `hyperamp_shm_queue.c`，已在 CMakeLists 中通过 `list(REMOVE_ITEM)` 排除，改用 front 版本的符号。**不要恢复该文件的编译**，否则会产生链接时符号冲突。
 
 ---
 
 ## 三、架构演化与系统现状
 
-本系统从**单通道雏形**演化为如今的**多通道分离 + 跨通道桥接**架构。
-**演化原因**：早期数据面与控制面耦合，导致加解密请求与网络代理握手产生时序冲突。分离 CH0 和 CH1 彻底解耦了内部可信处理与外部网络分发。
+本系统从**单通道雏形**演化为如今的**三通道分离 + 跨通道桥接**架构。
+**演化历程**：
+- **Phase 1**：单通道原型（CH0 承载全部流量）
+- **Phase 2**：CH0/CH1 双通道（解耦加解密与网络代理，消除时序冲突）
+- **Phase 3（当前）**：CH0/CH1/CH2 三通道（集成 monkey-mnemosyne 远程内存访问）
 
 ### 系统组件全景图
 ```text
@@ -56,13 +61,14 @@
 │     Linux Zone        │        seL4 Zone            │
 │                       │                             │
 │  hvisor-tool          │  hyperamp-server            │
-│  (CH0 connector)      │  (统一 rootserver)          │
-│       ↕ CH0           │    ├── channel_ch0 (处理)   │
+│  (CH0 connector)      │  (统一 rootserver, C+CXX)   │
+│       ↕ CH0           │    ├── channel_ch0 (加解密) │
 │                       │    ├── channel_ch1 (网代)   │
-│  cproxy-A (CH1)       │    └── main.c (多通道轮询)  │
-│       ↕ CH1           │                             │
-│                       │  [未来] channel_ch2 (远存)   │
-│  [未来] cproxy-B(CH2) │    ↕ CH2 (调试中,未接入)    │
+│  cproxy-A (CH1)       │    ├── channel_ch2 (远存)   │
+│       ↕ CH1           │    └── main.c (三通道轮询)  │
+│                       │                             │
+│  [未来] cproxy-B(CH2) │  monkey-mnemosyne-lib       │
+│       ↕ CH2           │  (C++20 静态库, extern C)   │
 ├───────────────────────┴─────────────────────────────┤
 │          共享内存 (0x7E000000 - 0x7E3FFFFF)         │
 └─────────────────────────────────────────────────────┘
@@ -71,9 +77,10 @@
 **组件状态**：
 1. **hvisor (EL2)**：提供硬件虚拟化、物理内存映射。当前版本不依赖中断。
 2. **hvisor-tool (Linux)**：CH0 的 Connector 端，负责发出图像/文本的加解密请求。
-3. **hyperamp-server (seL4)**：统一的后端。将原有的 `front` 源码库合并入编译系统（直接通过源码包含），在 `main.c` 中执行并发轮询。
-4. **HighSpeedCProxy / cproxy-A (Linux)**：当前仅用于 CH1 的 Connector 端，负责真正将 seL4 的网络代理包发往真实网卡。
-5. **CH2 (远程内存访问)**：物理地址空间已在底层分配 (`0x7E300000`)，IPC buffer `msg[8..10]` 已预留。`channel_ch2.c` 尚未创建，seL4 主循环中未接入。**未来计划**：独立运行第二个 cproxy 实例 (cproxy-B) 作为 CH2 的 Connector 端，用于跨 VM 远程内存访问。届时 Linux 侧将同时运行两个 cproxy 进程：cproxy-A 绑定 CH1（网络代理），cproxy-B 绑定 CH2（远程内存）。
+3. **hyperamp-server (seL4)**：统一的后端（C+CXX 混编项目）。合并了 `front` 源码（CH1 引擎）和 `monkey-mnemosyne-lib` 静态库（CH2 引擎），在 `main.c` 中执行三通道并发轮询。
+4. **HighSpeedCProxy / cproxy-A (Linux)**：当前用于 CH1 的 Connector 端，负责将 seL4 的网络代理包发往真实网卡。
+5. **monkey-mnemosyne-lib (seL4)**：C++20 编写的远程内存访问库，通过 `mnemosyne_api.h`（`extern "C"`）暴露纯 C 接口。内部包含 HyperAmpBridge（独立的 queue 驱动）、Protocol2Connection（TCP 协议栈）、ADL 分配器等。使用 4KiB 共享页作为数据载体。**该库的 `hyperamp_shm_queue.c` 已在 CMakeLists 中排除，使用 front 版本避免符号冲突。**
+6. **CH2 的 Linux 侧 Connector (未来)**：未来计划独立运行第二个 cproxy 实例 (cproxy-B) 绑定 CH2，用于 Linux 侧的远程内存访问。届时 Linux 侧将同时运行两个 cproxy 进程：cproxy-A 绑定 CH1（网络代理），cproxy-B 绑定 CH2（远程内存）。
 
 ---
 
@@ -108,11 +115,11 @@
 ## 五、共享内存与物理约定
 
 ### 5.1 物理地址与通道容量 (千万不可更改)
-| 通道 | 物理基址 | 大小 | TX Queue (seL4方向) | RX Queue (seL4方向) | Data 区域 | 槽位 (Capacity) | 状态 |
-|------|----------|------|--------------------|--------------------|-----------|-----------------|----|
-| CH0 | `0x7E000000` | 2MB | `0x7E000000` | `0x7E001000` | `0x7E002000` | 256 | ✅ 运行中 |
-| CH1 | `0x7E200000` | 1MB | `0x7E200000` | `0x7E201000` | `0x7E202000` | 253 | ✅ 运行中 |
-| CH2 | `0x7E300000` | 1MB | `0x7E300000` | `0x7E301000` | `0x7E302000` | 预留 | ⏳ 调试中 |
+| 通道 | 物理基址 | 大小 | TX Queue (seL4方向) | RX Queue (seL4方向) | Data 区域 | 槽位 (Capacity) | IPC MR | 状态 |
+|------|----------|------|--------------------|--------------------|-----------|-----------------|--------|----|
+| CH0 | `0x7E000000` | 2MB | `0x7E000000` | `0x7E001000` | `0x7E002000` | 256 | msg[2..4] | ✅ 运行中 |
+| CH1 | `0x7E200000` | 1MB | `0x7E200000` | `0x7E201000` | `0x7E202000` | 253 | msg[5..7] | ✅ 运行中 |
+| CH2 | `0x7E300000` | 1MB | `0x7E300000` | `0x7E301000` | `0x7E302000` | 253 | msg[8..10] | ✅ 运行中 |
 
 **容量差异说明**：CH0=256 与 CH1=253 不是笔误。容量由物理内存大小决定：CH0 有 2MB 空间，数据区可容纳大量块，取 256；CH1 只有 1MB，数据区 `(1MB - 8KB) / 4KB = 254` 个块，扣除环形队列区分满/空所需的 1 个空槽后，上限为 253。**不要擅自统一这两个值。**
 
@@ -120,7 +127,7 @@
 
 *注意：TX/RX 的视角是以 seL4 为主的。对于 Linux 来说方向正好相反。*
 
-地址在内核态 `boot.c` 初始化，并通过 IPC buffer 的 `msg[2..10]` 传递给 rootserver。如果 IPC buffer 被污染（例如在提取地址前错误地执行了其他 syscall），内存映射会立即崩溃。
+地址在内核态 `boot.c` 初始化，并通过 IPC buffer 的 `msg[2..10]` 传递给 rootserver。`main.c` 在入口处**一次性读取所有 11 个 MR 值**（CH0: MR 2-4, CH1: MR 5-7, CH2: MR 8-10），然后通过 `mnemosyne_engine_init_with_vaddrs()` 将 CH2 地址传入 monkey-mnemosyne 引擎。**不要在 seL4_GetMR() 调用之前插入任何 seL4 系统调用**，否则 IPC buffer 会被覆盖。
 
 ### 5.2 Creator/Connector 身份逻辑
 为避免两个 VM 启动时死锁或竞态条件，系统强制规范身份：
@@ -156,6 +163,13 @@
 **历史**：开启 `DUMP_BUFFER_CONTENT` 宏后，大文件传输时向串口输出大量二进制数据，由于串口速率极低，导致发送任务被严重阻塞，引发超时。
 **教训**：`frontend_api.c` 中的二进制打印宏必须保持注释状态。调试完毕后务必关闭。
 
+### 6. monkey-mnemosyne 集成的三个关键约束
+**（a）符号冲突**：monkey-mnemosyne 内部有一份精简版 `hyperamp_shm_queue.c`（删除了 `common_utils.h` 依赖和 debug 打印）。链接到 hyperamp-server 时会与 front 版本产生双重定义。当前已在 `monkey-mnemosyne/CMakeLists.txt` 中通过 `list(REMOVE_ITEM)` 排除，使用 front 版本的符号。**不要恢复该文件的编译。**
+
+**（b）IPC MR 读取时序 (方案 A)**：原版 `mnemosyne_engine_init()` 内部自行调用 `seL4_GetMR(8/9/10)`，但在三通道模式中 `main.c` 会在初始化 CH0/CH1 的过程中触发 syscall 导致 IPC buffer 被覆盖。因此新增了 `mnemosyne_engine_init_with_vaddrs()` 接口，由 `main.c` 统一在最开头读取所有 MR 值后传入。**不要改回使用原版 `mnemosyne_engine_init()`，除非能保证在调用前没有任何 syscall。**
+
+**（c）C/C++ 混编**：hyperamp-server 的 CMakeLists 已从 `project(... C)` 升级为 `project(... C CXX)`，链接 `monkey-mnemosyne-lib` C++ 静态库。monkey-mnemosyne 的子目录通过 `if(NOT TARGET sel4)` 跳过重复的 `find_package`，避免 seL4 库目标冲突。
+
 ---
 
 ## 七、构建指南与代码导航 (Agent Quickstart)
@@ -170,10 +184,13 @@ ninja
 
 ### 代码阅读链路 (推荐顺序)
 1. **基石层**：`front/include/hyperamp_shm_queue.h` 和 `front/src/hyperamp_shm_queue.c` (队列核心)
-2. **入口层**：`hyperamp-server/src/main.c` (IPC 读取，双通道初始化，轮询主循环)
+2. **入口层**：`hyperamp-server/src/main.c` (IPC 读取，三通道初始化，轮询主循环)
 3. **协议层**：`hyperamp-server/src/channel.c` (含安全的 Cache 维护封装)
 4. **业务层 CH0**：`hyperamp-server/src/channel_ch0.c` (加解密服务 + `ch0_try_forward_bulk_to_ch1` 桥接点)
 5. **业务层 CH1**：`hyperamp-server/src/channel_ch1.c` (向 cproxy 对接的网络前置栈 + `ch1_forward_bulk_raw_data`)
+6. **业务层 CH2**：`hyperamp-server/src/channel_ch2.c` (封装 `mnemosyne_api.h` 调用)
+7. **CH2 底层**：`monkey-mnemosyne/include/mnemosyne_api.h` → `monkey-mnemosyne/src/mnemosyne_api.cc` (纯 C 接口 → C++ 实现)
+8. **CH2 网络栈**：`monkey-mnemosyne/src/monkey/net/HyperAmpBridge.cc` (CH2 独立的 queue 驱动和 Session 管理)
 
 ### 验证工具链
 - **receiver.py** (`front/tools/receiver.py`)：监听 UDP 端口接收 cproxy 转发的数据，解析 `ForwardHeader` 后落盘为 `.png` 文件。用于端到端验证加解密结果的正确性。
@@ -189,7 +206,9 @@ ninja
 **在修改 `channel_ch*.c`、共享内存、queue、cache 相关代码前，你必须先确认自己能回答以下问题。如果无法回答，请先回读本文档对应章节，不要直接动手改代码。**
 
 1. **Creator/Connector**：当前系统中谁是 Creator、谁是 Connector？为什么不能反过来？
-2. **通道分工**：CH0 处理什么？CH1 处理什么？CH2 是什么状态？跨通道数据是怎么流转的？
+2. **通道分工**：CH0 处理什么？CH1 处理什么？CH2 处理什么？跨通道数据是怎么流转的？
 3. **Cache 封装**：读写共享内存时必须经过哪两个函数？如果绕过会发生什么？
 4. **Queue 所有权**：`head` 由谁推进？`tail` 由谁推进？`head == tail` 意味着什么？
 5. **Bulk 分块生命周期**：为什么转发循环中每次入队都要强制执行 `frontend_engine_run_hyperamp_once()`？删掉会怎样？
+6. **CH2 集成约束**：`mnemosyne_engine_init_with_vaddrs()` 与 `mnemosyne_engine_init()` 的区别是什么？为什么三通道模式下必须使用前者？
+7. **符号冲突**：monkey-mnemosyne 内部的 `hyperamp_shm_queue.c` 为什么被排除？如果恢复编译会发生什么？
