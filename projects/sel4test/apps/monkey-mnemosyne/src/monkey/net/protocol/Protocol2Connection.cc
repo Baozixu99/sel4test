@@ -281,4 +281,6 @@ Status Protocol2Connection::plainText(const adl::TString& text, int64_t* checksu
             break;
         *checksum = adl::ntohq(*(adl::int64_t*) response->msg);
     );
+
+    return status;
 }
