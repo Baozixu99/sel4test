@@ -135,7 +135,7 @@ struct SharedMemoryPoolQueue *shared_mem_pool_queue_create_frontend(const Shared
         return NULL;
     }
 
-    queue->virt_addr1 = virt_addr;
+    queue->virt_addr1 = (uint64_t) virt_addr;
 
     utils_print("queue->virt_addr1 = %lld\n", queue->virt_addr1);
 

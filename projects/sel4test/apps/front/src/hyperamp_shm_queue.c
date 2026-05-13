@@ -340,7 +340,7 @@ int hyperamp_queue_dequeue(volatile HyperampShmQueue *queue,
     parse_proxy_protocol_and_print(data);
 
     print_hex(data, read_len, 64);
-    print_hex(read_addr, read_len, 64);
+    print_hex((void*) read_addr, read_len, 64);
 
 #if 1
     printf("In %s, before update the tail pointer and the dequeue count, the content of message header:\n", __func__);

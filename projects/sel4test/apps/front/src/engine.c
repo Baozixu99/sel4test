@@ -1,6 +1,12 @@
 #include "engine.h"
 #include <platsupport/delay.h>
 #include <sel4/sel4.h>
+
+#include "frontend_proto.h"
+
+// Forward declaration.
+uint16_t hyperamp_safe_read_u16(const volatile void *addr, size_t offset);
+
 extern FrontendEngine *p_g_fr_eng;
 extern FrontendEngine g_fr_eng;
 
@@ -353,7 +359,7 @@ uint8_t *frontend_engine_rx_queue_get_msg(struct SharedMemoryPoolQueue *queue, s
     }
 
     utils_print("In %s, before call shared_mem_pool_queue_recv_zc, buf_ptr = %p\n", __func__, buff_addr);
-    ret_val = shared_mem_pool_queue_recv_zc(queue, &buff_addr, &buf_size);
+    ret_val = shared_mem_pool_queue_recv_zc(queue, (void**) &buff_addr, &buf_size);
     utils_print("In %s, after call shared_mem_pool_queue_recv_zc, buf_ptr = %p\n", __func__, buff_addr);
 
     if(FRONTEND_PROXY_PROCESS_ERROR == ret_val){
@@ -807,7 +813,7 @@ eng_run_step1:
     /*
      * Retrieve data from the RX queue.
      */
-            ret = frontend_engine_rx_queue_get(rx_queue, &proxy_msg, PROXY_MSG_HDR_PLUS_MAX_SIZE, &msg_size);
+            ret = frontend_engine_rx_queue_get(rx_queue, (void*) &proxy_msg, PROXY_MSG_HDR_PLUS_MAX_SIZE, (void*) &msg_size);
 
     /*
      * If returning FRONTEND_PROXY_PROCESS_ERROR, it indicates a system-level error (e.g., invalid queue handle, shared memory access exception, etc.)

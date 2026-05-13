@@ -7,6 +7,8 @@
 #include "shared_mem_io.h"
 #include "common_utils.h"
 
+#include "frontend_api.h"
+
 FrontendEngine *p_g_fr_eng = NULL;
 FrontendEngine g_fr_eng;
 struct FrontendSessionPool  *front_high_speed_pool = NULL;
@@ -303,7 +305,7 @@ void frontend_high_speed_delete_all_sess(struct FrontendSessionPool *s_pool)
     memcpy(&ipv4_para.dest_endpoint, &para->ip_port_tuple.ipv4_port_tuple, sizeof(ipv4_para.dest_endpoint));
 
 //    ret = build_proxy_general_message(engine, &proxy_msg_hdr, &ipv4_para, sizeof(ipv4_para), res_msg, MEMORY_ALLOC_SHARED, engine->tx_queue);
-    ret = build_proxy_general_message(engine, &proxy_msg_hdr, &ipv4_para, sizeof(ipv4_para), res_msg, MEMORY_ALLOC_AMPQUEUE, NULL);
+    ret = build_proxy_general_message(engine, &proxy_msg_hdr, (void*) &ipv4_para, sizeof(ipv4_para), res_msg, MEMORY_ALLOC_AMPQUEUE, NULL);
 
     if(ret != FRONTEND_PROXY_PROCESS_OK){
         error_print("frontend_high_speed_create_sess_step1 failed: failed to build proxy general message or send to shared memory TX queue!");
@@ -476,7 +478,7 @@ int frontend_high_speed_create_sess_passive(struct FrontendSessionPool *s_pool, 
     resp_data.code      = SESS_OP_CODE_SUCCESS;
 
 //    ret = build_proxy_general_message(engine, &proxy_msg_hdr, &resp_data, sizeof(resp_data), res_msg, MEMORY_ALLOC_SHARED, engine->tx_queue);
-    ret = build_proxy_general_message(engine, &proxy_msg_hdr, &resp_data, sizeof(resp_data), res_msg, MEMORY_ALLOC_AMPQUEUE, NULL);
+    ret = build_proxy_general_message(engine, &proxy_msg_hdr, (void*) &resp_data, sizeof(resp_data), res_msg, MEMORY_ALLOC_AMPQUEUE, NULL);
 
     if(FRONTEND_PROXY_PROCESS_OK != ret){
         error_print("frontend_high_speed_create_sess_passive: failed to build proxy response message for passive session creation!\n");
@@ -486,7 +488,7 @@ int frontend_high_speed_create_sess_passive(struct FrontendSessionPool *s_pool, 
 
 create_sess_passive_error:
 //    ret = build_proxy_general_message(engine, &proxy_msg_hdr, &resp_data, sizeof(resp_data), res_msg, MEMORY_ALLOC_SHARED, engine->tx_queue);
-    ret = build_proxy_general_message(engine, &proxy_msg_hdr, &resp_data, sizeof(resp_data), res_msg, MEMORY_ALLOC_AMPQUEUE, engine->tx_queue);
+    ret = build_proxy_general_message(engine, &proxy_msg_hdr, (void*) &resp_data, sizeof(resp_data), res_msg, MEMORY_ALLOC_AMPQUEUE, engine->tx_queue);
 
 
     if(FRONTEND_PROXY_PROCESS_OK != ret){

@@ -223,7 +223,7 @@ int device_msg_inject_frontend(FrontendEngine *engine){
     desc_string          = desc_buf;
 
     utils_print("In %s, before enter scenario_msg_inject\n", __func__);
-    ret = scenario_msg_inject_frontend(engine, dev_msg_hdr, &dev_msg_resp, sizeof(dev_msg_resp), MEMORY_ALLOC_SHARED, res_string, desc_string, desc_len);
+    ret = scenario_msg_inject_frontend(engine, dev_msg_hdr, (void*)&dev_msg_resp, sizeof(dev_msg_resp), MEMORY_ALLOC_SHARED, res_string, desc_string, desc_len);
 
     return ret;
 }
@@ -258,7 +258,7 @@ int strategy_msg_inject_frontend(FrontendEngine *engine){
     res_string             = res_buf;
     desc_string            = desc_buf;
 
-    ret = scenario_msg_inject_frontend(engine, strgy_msg_hdr, &strgy_resp, sizeof(strgy_resp), MEMORY_ALLOC_SHARED, res_string, desc_string, desc_len);
+    ret = scenario_msg_inject_frontend(engine, strgy_msg_hdr, (void*)&strgy_resp, sizeof(strgy_resp), MEMORY_ALLOC_SHARED, res_string, desc_string, desc_len);
 
     return ret;
 }
@@ -289,7 +289,7 @@ int session_msg_inject_frontend(FrontendEngine *engine){
     res_string              = res_buf;
     desc_string             = desc_buf;
 
-    ret = scenario_msg_inject_frontend(engine, sess_msg_hdr, &sess_msg_resp, sizeof(sess_msg_resp), MEMORY_ALLOC_SHARED, res_string, desc_string, desc_len);
+    ret = scenario_msg_inject_frontend(engine, sess_msg_hdr, (void*)&sess_msg_resp, sizeof(sess_msg_resp), MEMORY_ALLOC_SHARED, res_string, desc_string, desc_len);
 
     return FRONTEND_PROXY_PROCESS_OK;
 }
@@ -399,22 +399,22 @@ int test_proxy_scenario_msg_read_from_rx_queue_frontend(FrontendEngine *engine){
     }
 
 #if 1
-    proxy_msg = frontend_engine_rx_queue_get_msg(rx_queue, PROXY_MSG_HDR_PLUS_MAX_SIZE, &ret, &msg_size);
+    proxy_msg = frontend_engine_rx_queue_get_msg(rx_queue, PROXY_MSG_HDR_PLUS_MAX_SIZE, &ret, (void*)&msg_size);
     utils_print("In %s, after enter frontend_engine_rx_queue_get_msg\n", __func__);
     utils_print("rx queue header is %d, tail is %d, msg_size is %d, address of msg is %p\n", rx_queue->header, rx_queue->tail, msg_size, proxy_msg);
     frontend_proxy_msg_process(proxy_msg);
 
-    proxy_msg = frontend_engine_rx_queue_get_msg(rx_queue, PROXY_MSG_HDR_PLUS_MAX_SIZE, &ret, &msg_size);
+    proxy_msg = frontend_engine_rx_queue_get_msg(rx_queue, PROXY_MSG_HDR_PLUS_MAX_SIZE, &ret, (void*)&msg_size);
     utils_print("In %s, after enter frontend_engine_rx_queue_get_msg\n", __func__);
     utils_print("rx queue header is %d, tail is %d, msg_size is %d, address of msg is %p\n", rx_queue->header, rx_queue->tail, msg_size, proxy_msg);
     frontend_proxy_msg_process(proxy_msg);
 
-    proxy_msg = frontend_engine_rx_queue_get_msg(rx_queue, PROXY_MSG_HDR_PLUS_MAX_SIZE, &ret, &msg_size);
+    proxy_msg = frontend_engine_rx_queue_get_msg(rx_queue, PROXY_MSG_HDR_PLUS_MAX_SIZE, &ret, (void*) &msg_size);
     utils_print("In %s, after enter frontend_engine_rx_queue_get_msg\n", __func__);
     utils_print("rx queue header is %d, tail is %d, msg_size is %d, address of msg is %p\n", rx_queue->header, rx_queue->tail, msg_size, proxy_msg);
     frontend_proxy_msg_process(proxy_msg);
 
-    proxy_msg = frontend_engine_rx_queue_get_msg(rx_queue, PROXY_MSG_HDR_PLUS_MAX_SIZE, &ret, &msg_size);
+    proxy_msg = frontend_engine_rx_queue_get_msg(rx_queue, PROXY_MSG_HDR_PLUS_MAX_SIZE, &ret, (void*)&msg_size);
     utils_print("In %s, after enter frontend_engine_rx_queue_get_msg\n", __func__);
     utils_print("rx queue header is %d, tail is %d, msg_size is %d, address of msg is %p\n", rx_queue->header, rx_queue->tail, msg_size, proxy_msg);
     frontend_proxy_msg_process(proxy_msg);
@@ -493,7 +493,7 @@ int device_msg_inject_frontend_hyperamp(FrontendEngine *engine){
     desc_string          = desc_buf;
 
     utils_print("In %s, before enter scenario_msg_inject\n", __func__);
-    ret = scenario_msg_inject_frontend(engine, dev_msg_hdr, &dev_msg_mask, sizeof(dev_msg_mask), MEMORY_ALLOC_AMPQUEUE, res_string, desc_string, desc_len);
+    ret = scenario_msg_inject_frontend(engine, dev_msg_hdr, (void*)&dev_msg_mask, sizeof(dev_msg_mask), MEMORY_ALLOC_AMPQUEUE, res_string, desc_string, desc_len);
 
     return ret;
 }
@@ -535,7 +535,7 @@ int strategy_msg_inject_frontend_hyperamp(FrontendEngine *engine){
     res_string           = res_buf;
     desc_string          = desc_buf;
 
-    ret = scenario_msg_inject_frontend(engine, strgy_msg_hdr, &strgy, sizeof(strgy), MEMORY_ALLOC_AMPQUEUE, res_string, desc_string, desc_len);
+    ret = scenario_msg_inject_frontend(engine, strgy_msg_hdr, (void*)&strgy, sizeof(strgy), MEMORY_ALLOC_AMPQUEUE, res_string, desc_string, desc_len);
 
     return ret;
 }
@@ -583,7 +583,7 @@ int session_msg_inject_frontend_hyperamp(FrontendEngine *engine){
 
     utils_print("In %s, version = %d, type = %d\n", __func__, sess_msg_hdr->outer_header.version, sess_msg_hdr->outer_header.proxy_msg_type);
 
-    ret = scenario_msg_inject_frontend(engine, sess_msg_hdr, &sess_ipv4_paras, sizeof(sess_ipv4_paras), MEMORY_ALLOC_AMPQUEUE, res_string, desc_string, desc_len);
+    ret = scenario_msg_inject_frontend(engine, sess_msg_hdr, (void*)&sess_ipv4_paras, sizeof(sess_ipv4_paras), MEMORY_ALLOC_AMPQUEUE, res_string, desc_string, desc_len);
 
     return ret;
 }
@@ -639,7 +639,7 @@ int data_msg_inject_frontend_hyperamp(FrontendEngine *engine){
 
     DUMP_BUFFER_CONTENT(data_buf, 8, "%c");
 
-    ret = scenario_msg_inject_frontend(engine, data_msg_hdr, &data_buf, strlen(data_buf), MEMORY_ALLOC_AMPQUEUE, res_string, desc_string, desc_len);
+    ret = scenario_msg_inject_frontend(engine, data_msg_hdr, (const void*) &data_buf, strlen(data_buf), MEMORY_ALLOC_AMPQUEUE, res_string, desc_string, desc_len);
 
     return FRONTEND_PROXY_PROCESS_OK;
 }

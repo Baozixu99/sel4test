@@ -3,6 +3,8 @@
 #include "frontend_proto.h"
 #include "common_utils.h"
 
+#include "frontend_api.h"
+
 IoTFrontendSession *frontend_bluetooth_sess = NULL;
 IoTFrontendSession *frontend_can_sess = NULL;
 IoTFrontendSession *frontend_zigbee_sess = NULL;
