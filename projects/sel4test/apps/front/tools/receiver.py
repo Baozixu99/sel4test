@@ -53,10 +53,11 @@ def main():
                 expected_len = t_len
                 received_len = 0
                 
-                # Determine file name based on service type
+                # Determine file name based on service type and port
                 srv_name = "enc" if service_id == 1 else f"srv{service_id}"
                 bulk_str = "bulk" if is_bulk else "norm"
-                filename = f"fwd_{file_seq:03d}_{srv_name}_{bulk_str}.png"
+                ext = ".txt" if args.port == 8888 else ".png"
+                filename = f"fwd_{file_seq:03d}_{srv_name}_{bulk_str}{ext}"
                 filepath = os.path.join(args.dir, filename)
                 
                 print(f"[+] 收到新传输头: service={service_id}, bulk={is_bulk}, total_len={expected_len}")
