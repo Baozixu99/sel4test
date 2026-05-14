@@ -204,13 +204,13 @@ int hyperamp_queue_enqueue(volatile HyperampShmQueue *queue,
     uint16_t tail = hyperamp_safe_read_u16(queue, offsetof(HyperampShmQueue, tail));
     
     // Calculate the new header index
-    printf("In %s, tail = %u, header = %u\n", __func__, tail, header);
+    // printf("In %s, tail = %u, header = %u\n", __func__, tail, header);
     uint16_t new_header = header + 1;
     if (new_header >= capacity) {
         new_header -= capacity;
     }
     
-    parse_proxy_protocol_and_print(data);
+    // parse_proxy_protocol_and_print(data);
 
     // Check if the queue is full
     if (new_header == tail) {
@@ -318,7 +318,7 @@ int hyperamp_queue_dequeue(volatile HyperampShmQueue *queue,
     uint16_t capacity = hyperamp_safe_read_u16(queue, offsetof(HyperampShmQueue, capacity));
     
     // Check if the queue is empty
-    printf("In %s, tail = %u, header = %u\n", __func__, tail, header);
+    // printf("In %s, tail = %u, header = %u\n", __func__, tail, header);
     if (tail == header) {
         hyperamp_spinlock_unlock(HYPERAMP_QUEUE_LOCK(queue));
         return HYPERAMP_AGAIN;
@@ -337,12 +337,12 @@ int hyperamp_queue_dequeue(volatile HyperampShmQueue *queue,
     // Read the data
     hyperamp_safe_memcpy(data, (const volatile void *)read_addr, read_len);
 
-    parse_proxy_protocol_and_print(data);
+    // parse_proxy_protocol_and_print(data);
 
-    print_hex(data, read_len, 64);
-    print_hex((void*) read_addr, read_len, 64);
+    // print_hex(data, read_len, 64);
+    // print_hex((void*) read_addr, read_len, 64);
 
-#if 1
+#if 0
     printf("In %s, before update the tail pointer and the dequeue count, the content of message header:\n", __func__);
 //    DUMP_PROXY_MSG_HEADER(data);
 #endif
@@ -360,8 +360,8 @@ int hyperamp_queue_dequeue(volatile HyperampShmQueue *queue,
         new_tail -= capacity;
     }
 
-    printf("After set new_tail\n");
-    DUMP_PROXY_MSG_HEADER(data);
+    // printf("After set new_tail\n");
+    // DUMP_PROXY_MSG_HEADER(data);
 
 #if 1    
     volatile uint8_t *p = (volatile uint8_t *)queue;
@@ -379,7 +379,7 @@ int hyperamp_queue_dequeue(volatile HyperampShmQueue *queue,
 #endif
 
 
- #if 1
+ #if 0
     printf("In %s, after update the tail pointer and the dequeue count, the content of message header:\n", __func__);
     DUMP_PROXY_MSG_HEADER(data);
 #endif
@@ -389,8 +389,8 @@ int hyperamp_queue_dequeue(volatile HyperampShmQueue *queue,
     // Release the lock
     hyperamp_spinlock_unlock(HYPERAMP_QUEUE_LOCK(queue));
 
-    printf("After unlock spinlock\n");
-    DUMP_PROXY_MSG_HEADER(data);
+    // printf("After unlock spinlock\n");
+    // DUMP_PROXY_MSG_HEADER(data);
     
     return HYPERAMP_OK;
 }
