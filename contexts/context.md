@@ -15,7 +15,11 @@
 - CH0/CH1/CH2 三通道共享内存通信（polling 模式，三通道并发轮询）
 - CH0 加解密 / 签名验证 / 字段校验 / Bulk 大文件处理
 - CH1 网络代理通信（Session 建立 + 数据转发）
-- CH2 远程内存访问（monkey-mnemosyne，4KiB 共享页读写，TCP 协议栈）
+- CH2 远程内存访问（monkey-mnemosyne，TCP 协议栈经 HyperAMP 透传）
+  - 主动连接 Monkey Mnemosyne 服务端（TCP，默认端口 10100）
+  - Session 持久化：首次轮询时建立连接，后续轮询复用同一 Session
+  - plainText 数据交换 + checksum 校验已验证通过
+  - 4KiB 共享页 tryAlloc/readBlock/writeBlock 内存操作可用
 - CH0 → CH1 跨通道桥接：加密和解密结果均可通过网络代理分发
 - Bulk 数据分块传输 + 引擎强制流转内存回收（支持 ~2MB 以内的文件）
 - Linux 侧 receiver.py 接收并落盘转发数据（.png 格式）
@@ -24,6 +28,7 @@
 **未实现 / 规划中**：
 - 中断驱动通信模式（当前全部使用 polling）
 - CH2 的 Linux 侧 Connector（cproxy-B）尚未独立部署，当前 CH2 通过 seL4 内嵌的 HyperAmpBridge 直接驱动
+- seL4 端缺页处理 + 页面管理（monkey-mnemosyne 的设计目标，尚未实现）
 
 ---
 
@@ -79,16 +84,23 @@
 2. **hvisor-tool (Linux)**：CH0 的 Connector 端，负责发出图像/文本的加解密请求。
 3. **hyperamp-server (seL4)**：统一的后端（C+CXX 混编项目）。合并了 `front` 源码（CH1 引擎）和 `monkey-mnemosyne-lib` 静态库（CH2 引擎），在 `main.c` 中执行三通道并发轮询。
 4. **HighSpeedCProxy / cproxy-A (Linux)**：当前用于 CH1 的 Connector 端，负责将 seL4 的网络代理包发往真实网卡。
-5. **monkey-mnemosyne-lib (seL4)**：C++20 编写的远程内存访问库，通过 `mnemosyne_api.h`（`extern "C"`）暴露纯 C 接口。内部包含 HyperAmpBridge（独立的 queue 驱动）、Protocol2Connection（TCP 协议栈）、ADL 分配器等。使用 4KiB 共享页作为数据载体。**该库的 `hyperamp_shm_queue.c` 已在 CMakeLists 中排除，使用 front 版本避免符号冲突。**
-6. **CH2 的 Linux 侧 Connector (未来)**：未来计划独立运行第二个 cproxy 实例 (cproxy-B) 绑定 CH2，用于 Linux 侧的远程内存访问。届时 Linux 侧将同时运行两个 cproxy 进程：cproxy-A 绑定 CH1（网络代理），cproxy-B 绑定 CH2（远程内存）。
+5. **monkey-mnemosyne-lib (seL4)**：C++20 编写的远程内存访问库，通过 `mnemosyne_api.h`（`extern "C"`）暴露纯 C 接口。核心组件：
+   - `HyperAmpBridge`：CH2 独立的 HyperAMP queue 驱动（单例，直接操作 TX/RX 队列）
+   - `Protocol2Connection`：Monkey 专用 TCP 协议栈，支持 tryAlloc / readBlock / writeBlock / refBlock / unrefBlock / plainText 等操作
+   - `ADL 分配器`：C++ 内存管理层，映射到 `malloc/free`
+   - **该库的 `hyperamp_shm_queue.c` 已在 CMakeLists 中排除，使用 front 版本避免符号冲突。**
+6. **Monkey Mnemosyne 服务端 (Linux)**：独立的 aarch64 二进制程序，运行在 Linux 侧（可以是同一台机器或远端主机），监听 TCP 端口 10100。seL4 通过 CH2 → HyperAmpBridge → cproxy → 真实网络 → 服务端 的链路与之通信。服务端详细信息见 `monkey-mnemosyne/docs/usage.md`。
+7. **CH2 的 Linux 侧 Connector (未来)**：未来计划独立运行第二个 cproxy 实例 (cproxy-B) 绑定 CH2，用于 Linux 侧的远程内存访问。届时 Linux 侧将同时运行两个 cproxy 进程：cproxy-A 绑定 CH1（网络代理），cproxy-B 绑定 CH2（远程内存）。
 
 ---
 
 ## 四、核心机制：数据流与跨通道桥接 (Cross-Channel Bridging)
 
-跨通道桥接是系统的**核心亮点**。它实现了安全处理（CH0）与对外网络分发（CH1）的协同工作。
+### 4.1 CH0 ↔ CH1 跨通道桥接
 
-### 数据流模型
+跨通道桥接实现了安全处理（CH0）与对外网络分发（CH1）的协同工作。
+
+**数据流模型**：
 1. **独立的 CH0 请求/响应**（如普通解密/验签）：
    Linux (hvisor-tool) ─CH0→ seL4 处理完成 ─CH0→ Linux (hvisor-tool)
 2. **独立的 CH1 代理流**：
@@ -109,6 +121,29 @@
 **工程实现限制**：
 - `channel_ch0.c` 调用 `ch0_try_forward_bulk_to_ch1` 后，数据只放入了 CH1 内部的 `F2B (Front-to-Backend)` 队列。真实写入共享内存的操作是在下一次主循环执行 `ch1_process_message()` 中的引擎运转时发生的。
 - 跨通道转发依赖 `ForwardHeader` 结构 (magic=`0x48465744` / "HFWD", 12 bytes)。第一个 chunk 携带 ForwardHeader（含 service_id、is_bulk、total_len），后续 chunk 为裸数据。Linux 侧 `receiver.py` 依据此 Header 识别新传输并创建文件。
+
+### 4.2 CH2 远程内存访问流程
+
+CH2 的运行模式与 CH0/CH1 不同：它不是被动等待请求，而是**主动建立 TCP Session 并持续驱动数据交换**。
+
+**生命周期**：
+```text
+main.c 三通道轮询 → ch2_process_message()
+                      │
+                      ├── 首次调用：connect_to_monkey_mnemosyne()
+                      │     └── mnemosyne_sess_new() → mnemosyne_sess_connect_by_addrstr_devid()
+                      │           └── TCP 连接建立 + Protocol2 Hello/Auth + tryAlloc 内存块
+                      │
+                      └── 后续调用：send_plain_text()
+                            └── mnemosyne_sess_send_plain_text() → Protocol2Connection::plainText()
+                                  └── 服务端返回 checksum
+```
+
+**关键特性**：
+- **Session 持久化**：`mnemosyne_data.session` 全局保持，首次建立后在整个生命周期复用
+- **plainText 交换**：当前测试模式下，每次轮询发送一条递增字母的文本（A→Z 循环），服务端计算 ASCII checksum 并返回
+- **服务端配置**：IP/端口/AuthKey 在 `channel_ch2.c` 顶部宏定义中硬编码，修改后需重新编译
+- **Monkey Protocol2 协议栈**：支持 tryAlloc / readBlock / writeBlock / refBlock / unrefBlock / plainText 等操作（见 `Protocol2Connection.h`）
 
 ---
 
@@ -188,15 +223,27 @@ ninja
 3. **协议层**：`hyperamp-server/src/channel.c` (含安全的 Cache 维护封装)
 4. **业务层 CH0**：`hyperamp-server/src/channel_ch0.c` (加解密服务 + `ch0_try_forward_bulk_to_ch1` 桥接点)
 5. **业务层 CH1**：`hyperamp-server/src/channel_ch1.c` (向 cproxy 对接的网络前置栈 + `ch1_forward_bulk_raw_data`)
-6. **业务层 CH2**：`hyperamp-server/src/channel_ch2.c` (封装 `mnemosyne_api.h` 调用)
-7. **CH2 底层**：`monkey-mnemosyne/include/mnemosyne_api.h` → `monkey-mnemosyne/src/mnemosyne_api.cc` (纯 C 接口 → C++ 实现)
-8. **CH2 网络栈**：`monkey-mnemosyne/src/monkey/net/HyperAmpBridge.cc` (CH2 独立的 queue 驱动和 Session 管理)
+6. **业务层 CH2**：`hyperamp-server/src/channel_ch2.c` (Session 建立 + plainText 发送循环 + mnemosyne API 封装)
+7. **CH2 C 接口**：`monkey-mnemosyne/include/mnemosyne_api.h` → `monkey-mnemosyne/src/mnemosyne_api.cc` (纯 C facade → C++ 实现)
+8. **CH2 协议栈**：`monkey-mnemosyne/src/monkey/net/protocol/Protocol2Connection.cc` (Monkey Protocol2：tryAlloc / readBlock / writeBlock / plainText 等)
+9. **CH2 网络栈**：`monkey-mnemosyne/src/monkey/net/HyperAmpBridge.cc` (CH2 独立的 HyperAMP queue 驱动、Session 创建和数据收发)
+10. **CH2 文档**：`monkey-mnemosyne/docs/usage.md` (服务端部署、客户端配置、测试方案)
 
 ### 验证工具链
-- **receiver.py** (`front/tools/receiver.py`)：监听 UDP 端口接收 cproxy 转发的数据，解析 `ForwardHeader` 后落盘为 `.png` 文件。用于端到端验证加解密结果的正确性。
+- **receiver.py** (`front/tools/receiver.py`)：监听 UDP 端口接收 cproxy 转发的数据，解析 `ForwardHeader` 后根据8888和8889落盘为 `.txt/.png` 文件。用于端到端验证加解密结果的正确性。
   ```bash
   # 在 Linux 侧运行（监听 Bulk 端口 8889）
-  python3 receiver.py --port 8889 --dir /home/x7x/fwd_output
+ip netns exec ns1 python3 receiver.py --port 8888 --dir ./fwd_text &
+ip netns exec ns1 python3 receiver.py --port 8889 --dir ./fwd_binary &
+ip netns exec ns1 ./cproxy > cproxy.log 2>&1 &
+
+  ```
+- **Monkey Mnemosyne 服务端**：需要在可达的 Linux 主机上运行（详见 `monkey-mnemosyne/docs/usage.md`）。seL4 启动后 CH2 会自动连接。
+  ```bash
+  # 在 Linux 侧运行服务端（默认端口 10100）
+  #cproxy-ch2和cproxy本质都是HighSpeedCProxy编译出来的，只是用到通道地址不同，cproxy-ch2用的通道地址为SHM_CH1_PADDR，cproxy用的通道地址为SHM_CH0_PADDR
+  ip netns exec ns1 ./cproxy-ch2 > cproxy-ch2.log 2>&1 &
+  ./monkey-mnemosyne &
   ```
 
 ---
